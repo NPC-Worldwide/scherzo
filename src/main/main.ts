@@ -11,8 +11,6 @@ const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
 const DB_DIR = path.join(os.homedir(), '.npcsh', 'scherzo', 'data');
 const DB_PATH = path.join(DB_DIR, 'repertoire.db');
 
-let backendProcess: ReturnType<typeof spawn> | null = null;
-
 function initDb(): sqlite3.Database {
   fs.mkdirSync(DB_DIR, { recursive: true });
   const db = new sqlite3.Database(DB_PATH);
@@ -60,66 +58,6 @@ const dbRun = (sql: string, params: any[] = []): Promise<any> => new Promise((re
   db.run(sql, params, function(err) { err ? rej(err) : res({ id: this.lastID, changes: this.changes }); });
 });
 
-// Backend helpers
-async function isBackendAlive(): Promise<boolean> {
-  try {
-    const res = await fetch(`${BACKEND_URL}/api/health`, { method: 'GET', signal: AbortSignal.timeout(2000) });
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
-function getPythonPath(): string | null {
-  const candidates = [
-    path.join(os.homedir(), '.npcsh', 'venv', 'bin', 'python3'),
-    path.join(os.homedir(), '.npcsh', 'venv', 'Scripts', 'python.exe'),
-    path.join(os.homedir(), '.venv', 'bin', 'python3'),
-    path.join(os.homedir(), '.venv', 'Scripts', 'python.exe'),
-  ];
-  for (const p of candidates) {
-    if (fs.existsSync(p)) return p;
-  }
-  try {
-    const which = require('child_process').execSync('which python3 || which python', { encoding: 'utf8' }).trim();
-    if (which) return which;
-  } catch {}
-  return null;
-}
-
-async function ensureBackend(): Promise<boolean> {
-  if (await isBackendAlive()) return true;
-  const python = getPythonPath();
-  if (!python) {
-    console.error('[Scherzo] No Python found to start backend');
-    return false;
-  }
-  try {
-    backendProcess = spawn(python, ['-m', 'npcpy.serve'], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true,
-      env: {
-        ...process.env,
-        INCOGNIDE_PORT: String(BACKEND_PORT),
-        FLASK_DEBUG: '1',
-        PYTHONUNBUFFERED: '1',
-        PYTHONIOENCODING: 'utf-8',
-        HOME: os.homedir(),
-      },
-    });
-    backendProcess.stdout?.on('data', (d) => console.log('[Backend]', d.toString().trim()));
-    backendProcess.stderr?.on('data', (d) => console.error('[Backend]', d.toString().trim()));
-    for (let i = 0; i < 30; i++) {
-      await new Promise(r => setTimeout(r, 500));
-      if (await isBackendAlive()) return true;
-    }
-    return false;
-  } catch (err) {
-    console.error('[Scherzo] Failed to start backend:', err);
-    return false;
-  }
-}
-
 function resolveHelperScript(scriptName: string): string | null {
   const candidates = [
     path.resolve(__dirname, '..', '..', 'resources', scriptName),
@@ -161,6 +99,23 @@ function shellOutHelper(pythonPath: string, scriptName: string, payload: any): P
       resolve({ success: false, error: `Failed to write to helper stdin: ${(err as Error).message}` });
     }
   });
+}
+
+function getPythonPath(): string | null {
+  const candidates = [
+    path.join(os.homedir(), '.npcsh', 'venv', 'bin', 'python3'),
+    path.join(os.homedir(), '.npcsh', 'venv', 'Scripts', 'python.exe'),
+    path.join(os.homedir(), '.venv', 'bin', 'python3'),
+    path.join(os.homedir(), '.venv', 'Scripts', 'python.exe'),
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+  try {
+    const which = require('child_process').execSync('which python3 || which python', { encoding: 'utf8' }).trim();
+    if (which) return which;
+  } catch {}
+  return null;
 }
 
 // File-system IPC
@@ -262,12 +217,8 @@ ipcMain.handle('generate_music', async (_, { prompt, provider, model, duration, 
   const p = (provider || 'local').toLowerCase();
   const isLocal = ['local', 'musicgen', 'transformers', 'meta'].includes(p);
 
-  // Non-local providers always go through the backend
+  // Non-local providers: proxy to the shared backend exactly like incognide does
   if (!isLocal) {
-    const backendReady = await ensureBackend();
-    if (!backendReady) {
-      return { success: false, error: 'Backend is not running and could not be started. Configure a Python venv with npcpy installed.' };
-    }
     try {
       const response = await fetch(`${BACKEND_URL}/api/generate_music`, {
         method: 'POST',
@@ -281,7 +232,7 @@ ipcMain.handle('generate_music', async (_, { prompt, provider, model, duration, 
       return data;
     } catch (error: any) {
       console.error('Error generating music via backend:', error);
-      return { success: false, error: error.message || 'Music generation failed' };
+      return { success: false, error: error.message || 'Music generation failed — is the backend running?' };
     }
   }
 
