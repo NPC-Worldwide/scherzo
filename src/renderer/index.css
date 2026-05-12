@@ -1,0 +1,104 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --theme-bg-dark: #0f172a;
+  --theme-text-dark: #f1f5f9;
+  --theme-primary-dark: #3b82f6;
+  --theme-bg-secondary-dark: color-mix(in srgb, var(--theme-bg-dark), #fff 8%);
+  --theme-bg-tertiary-dark: color-mix(in srgb, var(--theme-bg-dark), #fff 15%);
+  --theme-text-secondary-dark: color-mix(in srgb, var(--theme-text-dark), var(--theme-bg-dark) 10%);
+  --theme-text-muted-dark: color-mix(in srgb, var(--theme-text-dark), var(--theme-bg-dark) 25%);
+  --theme-border-dark: color-mix(in srgb, var(--theme-bg-dark), #fff 20%);
+  --theme-border-secondary-dark: color-mix(in srgb, var(--theme-bg-dark), #fff 30%);
+  --theme-input-bg-dark: var(--theme-bg-secondary-dark);
+  --theme-input-border-dark: var(--theme-border-secondary-dark);
+  --theme-button-bg-dark: var(--theme-bg-tertiary-dark);
+  --theme-button-hover-dark: color-mix(in srgb, var(--theme-bg-dark), #fff 25%);
+  --theme-primary-hover-dark: color-mix(in srgb, var(--theme-primary-dark), #000 20%);
+  --theme-success-dark: #10b981;
+  --theme-success-hover-dark: #059669;
+  --theme-danger-dark: #ef4444;
+  --theme-danger-hover-dark: #dc2626;
+  --theme-hover-dark: color-mix(in srgb, var(--theme-bg-dark), #fff 20%);
+  --theme-active-dark: color-mix(in srgb, var(--theme-bg-dark), #fff 25%);
+  --theme-selected-dark: var(--theme-primary-dark);
+
+  --theme-bg: var(--theme-bg-dark);
+  --theme-bg-secondary: var(--theme-bg-secondary-dark);
+  --theme-bg-tertiary: var(--theme-bg-tertiary-dark);
+  --theme-text: var(--theme-text-dark);
+  --theme-text-secondary: var(--theme-text-secondary-dark);
+  --theme-text-muted: var(--theme-text-muted-dark);
+  --theme-border: var(--theme-border-dark);
+  --theme-border-secondary: var(--theme-border-secondary-dark);
+  --theme-input-bg: var(--theme-input-bg-dark);
+  --theme-input-border: var(--theme-input-border-dark);
+  --theme-button-bg: var(--theme-button-bg-dark);
+  --theme-button-hover: var(--theme-button-hover-dark);
+  --theme-primary: var(--theme-primary-dark);
+  --theme-primary-hover: var(--theme-primary-hover-dark);
+  --theme-success: var(--theme-success-dark);
+  --theme-success-hover: var(--theme-success-hover-dark);
+  --theme-danger: var(--theme-danger-dark);
+  --theme-danger-hover: var(--theme-danger-hover-dark);
+  --theme-hover: var(--theme-hover-dark);
+  --theme-active: var(--theme-active-dark);
+  --theme-selected: var(--theme-selected-dark);
+}
+
+body {
+  background-color: var(--theme-bg);
+  color: var(--theme-text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-size: 14px;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+#root {
+  height: 100vh;
+  width: 100vw;
+}
+
+.theme-bg-primary { background-color: var(--theme-bg) !important; }
+.theme-bg-secondary { background-color: var(--theme-bg-secondary) !important; }
+.theme-bg-tertiary { background-color: var(--theme-bg-tertiary) !important; }
+
+.theme-text-primary { color: var(--theme-text) !important; }
+.theme-text-secondary { color: var(--theme-text-secondary) !important; }
+.theme-text-muted { color: var(--theme-text-muted) !important; }
+
+.theme-border { border-color: var(--theme-border) !important; }
+.theme-border-secondary { border-color: var(--theme-border-secondary) !important; }
+
+.theme-hover:hover { background-color: var(--theme-button-hover) !important; }
+
+.theme-button {
+  background-color: var(--theme-button-bg) !important;
+  color: var(--theme-text) !important;
+  border-color: var(--theme-border) !important;
+}
+
+.theme-button:hover { background-color: var(--theme-button-hover) !important; }
+
+.overflow-auto, .overflow-y-auto {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(100,100,100,0.3) transparent;
+}
+
+.overflow-auto::-webkit-scrollbar, .overflow-y-auto::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+.overflow-auto::-webkit-scrollbar-track, .overflow-y-auto::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.overflow-auto::-webkit-scrollbar-thumb, .overflow-y-auto::-webkit-scrollbar-thumb {
+  background: rgba(100,100,100,0.3);
+  border-radius: 2px;
+}
