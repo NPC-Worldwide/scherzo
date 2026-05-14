@@ -18,6 +18,7 @@ export interface IElectronAPI {
   repertoireDeleteSheet: (sheetId: number) => Promise<any>;
   generateMusic: (prompt: string, provider: string, model: string, duration: number, currentPath: string | undefined, opts?: { workspacePath?: string; baseFilename?: string; apiKey?: string }) => Promise<any>;
   loadDemoTracks: () => Promise<any>;
+  proxyFetch: (url: string, options?: any) => Promise<any>;
 }
 
 contextBridge.exposeInMainWorld('api', {
@@ -39,6 +40,7 @@ contextBridge.exposeInMainWorld('api', {
   generateMusic: (prompt: string, provider: string, model: string, duration: number, currentPath: string | undefined, opts = {}) =>
     ipcRenderer.invoke('generate_music', { prompt, provider, model, duration, currentPath, workspacePath: opts.workspacePath, baseFilename: opts.baseFilename, apiKey: opts.apiKey }),
   loadDemoTracks: () => ipcRenderer.invoke('load_demo_tracks'),
+  proxyFetch: (url: string, options?: any) => ipcRenderer.invoke('proxy-fetch', url, options),
 } as IElectronAPI);
 
 declare global {
