@@ -734,10 +734,11 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
     const currentMode_obj = SCHERZO_MODES.find(m => m.id === activeMode) || SCHERZO_MODES[0];
     const CurrentModeIcon = currentMode_obj.icon;
 
+    const isMac = navigator.platform.startsWith('Mac');
     const renderSidebar = () => {
         if (sidebarCollapsed) {
             return (
-                <div className="w-12 border-r theme-border theme-bg-secondary flex flex-col items-center py-2">
+                <div className={`w-12 border-r theme-border theme-bg-secondary flex flex-col items-center ${isMac ? 'pt-8 pb-2' : 'py-2'}`}>
                     <button
                         onClick={() => setSidebarCollapsed(false)}
                         className="p-2 theme-hover rounded mb-2"
@@ -752,7 +753,7 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
         }
 
         return (
-            <div className="w-64 border-r theme-border theme-bg-secondary flex flex-col overflow-hidden">
+            <div className={`w-64 border-r theme-border theme-bg-secondary flex flex-col overflow-hidden ${isMac ? 'pt-8' : ''}`}>
                 <div className="p-3 border-b theme-border flex items-center justify-between">
                     <div className="flex items-center gap-2">
                         <Music size={20} className="text-purple-400"/>

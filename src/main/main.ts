@@ -1,15 +1,114 @@
-import { app, BrowserWindow, ipcMain, dialog } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, protocol } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import sqlite3 from 'sqlite3';
 import { spawn } from 'child_process';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const IS_DEV = process.env.NODE_ENV === 'development' || process.argv.includes('--dev');
-const BACKEND_PORT = IS_DEV ? '5437' : '5337';
+const BACKEND_PORT = IS_DEV ? '7139' : '5139';
 const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
 const DB_DIR = path.join(os.homedir(), '.npcsh', 'scherzo', 'data');
 const DB_PATH = path.join(DB_DIR, 'repertoire.db');
+
+protocol.registerSchemesAsPrivileged([{
+  scheme: 'media',
+  privileges: { standard: true, supportFetchAPI: true, stream: true, secure: true, corsEnabled: true }
+}]);
+
+let backendProcess: ReturnType<typeof spawn> | null = null;
+
+function killBackendProcess() {
+  if (!backendProcess) return;
+  console.log('[Main] Killing backend process');
+  if (process.platform === 'win32') {
+    try { require('child_process').execSync(`taskkill /F /T /PID ${backendProcess.pid}`, { stdio: 'ignore' }); } catch {}
+  } else {
+    try { process.kill(-backendProcess.pid, 'SIGTERM'); } catch {}
+  }
+  backendProcess = null;
+}
+
+function spawnBackendProcess(pythonPath: string, args: string[], env: Record<string, string>) {
+  console.log(`[Main] Spawning backend: ${pythonPath} ${args.join(' ')}`);
+  const proc = spawn(pythonPath, args, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+    detached: process.platform !== 'win32',
+    env,
+  });
+  proc.stdout.on('data', (d) => console.log('[Backend stdout]', d.toString().trim()));
+  proc.stderr.on('data', (d) => console.error('[Backend stderr]', d.toString().trim()));
+  proc.on('error', (err) => console.error('[Backend error]', err.message));
+  proc.on('close', (code) => console.log(`[Backend] exited with code ${code}`));
+  return proc;
+}
+
+async function waitForServer(maxAttempts = 60, delay = 1000) {
+  for (let i = 1; i <= maxAttempts; i++) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 2000);
+      const res = await fetch(`${BACKEND_URL}/api/health`, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (res.ok) { console.log(`[Main] Backend ready (attempt ${i})`); return true; }
+    } catch {}
+    await new Promise(r => setTimeout(r, delay));
+  }
+  console.error('[Main] Backend failed to start');
+  return false;
+}
+
+function getBackendPythonPath(): string | null {
+  const rc = path.join(os.homedir(), '.npcshrc');
+  try {
+    if (fs.existsSync(rc)) {
+      const content = fs.readFileSync(rc, 'utf8');
+      const m = content.match(/BACKEND_PYTHON_PATH=["']?([^"'\n]+)["']?/);
+      if (m?.[1]?.trim()) {
+        const p = m[1].trim().replace(/^~/, os.homedir());
+        if (fs.existsSync(p)) return p;
+      }
+    }
+  } catch {}
+  return getPythonPath();
+}
+
+async function startBackend() {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2000);
+    const res = await fetch(`${BACKEND_URL}/api/health`, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (res.ok) { console.log('[Main] Backend already running'); return true; }
+  } catch {}
+
+  const python = getBackendPythonPath();
+  if (!python) {
+    console.error('[Main] No Python found for backend');
+    return false;
+  }
+
+  const backendEnv = {
+    ...process.env,
+    SCHERZO_PORT: BACKEND_PORT,
+    FRONTEND_PORT: IS_DEV ? '7339' : '6339',
+    FLASK_DEBUG: IS_DEV ? '1' : '0',
+    PYTHONUNBUFFERED: '1',
+    PYTHONIOENCODING: 'utf-8',
+    HOME: os.homedir(),
+    NPCSH_BASE: path.join(os.homedir(), '.npcsh'),
+  };
+
+  const scriptPath = path.join(__dirname, '..', 'resources', 'scherzo_serve.py');
+  backendProcess = spawnBackendProcess(python, [scriptPath], backendEnv);
+  return await waitForServer();
+}
+
+app.on('before-quit', () => killBackendProcess());
 
 function initDb(): sqlite3.Database {
   fs.mkdirSync(DB_DIR, { recursive: true });
@@ -36,15 +135,18 @@ function createWindow() {
     width: 1400, height: 900, minWidth: 900, minHeight: 600,
     titleBarStyle: 'hiddenInset',
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true, nodeIntegration: false,
+      webSecurity: false,
+      allowRunningInsecureContent: true,
     },
   });
-  if (IS_DEV) { win.loadURL('http://localhost:5173'); win.webContents.openDevTools(); }
+  if (IS_DEV) { win.loadURL('http://localhost:7339'); win.webContents.openDevTools(); }
   else { win.loadFile(path.join(__dirname, '../dist/index.html')); }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  await startBackend();
   createWindow();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });

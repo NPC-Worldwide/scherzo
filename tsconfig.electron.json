@@ -1,7 +1,7 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "CommonJS",
+    "module": "ES2022",
     "jsx": "preserve",
     "outDir": "./dist-electron",
     "rootDir": "./src/main",
