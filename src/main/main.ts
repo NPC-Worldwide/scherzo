@@ -27,7 +27,10 @@ function killBackendProcess() {
   if (process.platform === 'win32') {
     try { require('child_process').execSync(`taskkill /F /T /PID ${backendProcess.pid}`, { stdio: 'ignore' }); } catch {}
   } else {
-    try { process.kill(-backendProcess.pid, 'SIGTERM'); } catch {}
+    const pid = backendProcess.pid;
+    if (pid !== undefined) {
+      try { process.kill(-pid, 'SIGTERM'); } catch {}
+    }
   }
   backendProcess = null;
 }
@@ -154,10 +157,10 @@ app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(
 
 const db = initDb();
 const dbQuery = (sql: string, params: any[] = []): Promise<any[]> => new Promise((res, rej) => {
-  db.all(sql, params, (err, rows) => err ? rej(err) : res(rows));
+  db.all(sql, params, (err: Error | null, rows: any[]) => err ? rej(err) : res(rows));
 });
 const dbRun = (sql: string, params: any[] = []): Promise<any> => new Promise((res, rej) => {
-  db.run(sql, params, function(err) { err ? rej(err) : res({ id: this.lastID, changes: this.changes }); });
+  db.run(sql, params, function(this: sqlite3.RunResult, err: Error | null) { err ? rej(err) : res({ id: this.lastID, changes: this.changes }); });
 });
 
 function resolveHelperScript(scriptName: string): string | null {
