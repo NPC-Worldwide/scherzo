@@ -2,5 +2,7 @@ node_modules
 dist
 dist-electron
 release
+pyinstaller_dist
 *.log
 .DS_Store
+

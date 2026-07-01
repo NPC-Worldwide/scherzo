@@ -43,10 +43,10 @@ function spawnBackendProcess(pythonPath: string, args: string[], env: Record<str
     detached: process.platform !== 'win32',
     env,
   });
-  proc.stdout.on('data', (d) => console.log('[Backend stdout]', d.toString().trim()));
-  proc.stderr.on('data', (d) => console.error('[Backend stderr]', d.toString().trim()));
-  proc.on('error', (err) => console.error('[Backend error]', err.message));
-  proc.on('close', (code) => console.log(`[Backend] exited with code ${code}`));
+  proc.stdout.on('data', (d: Buffer) => console.log('[Backend stdout]', d.toString().trim()));
+  proc.stderr.on('data', (d: Buffer) => console.error('[Backend stderr]', d.toString().trim()));
+  proc.on('error', (err: Error) => console.error('[Backend error]', err.message));
+  proc.on('close', (code: number | null) => console.log(`[Backend] exited with code ${code}`));
   return proc;
 }
 
@@ -106,8 +106,22 @@ async function startBackend() {
     NPCSH_BASE: path.join(os.homedir(), '.npcsh'),
   };
 
-  const scriptPath = path.join(__dirname, '..', 'resources', 'scherzo_serve.py');
-  backendProcess = spawnBackendProcess(python, [scriptPath], backendEnv);
+  const isDev = process.env.NODE_ENV === 'development' || process.argv.includes('--dev');
+  if (isDev) {
+    const devScriptPath = path.join(app.getAppPath(), 'scherzo_serve.py');
+    if (fs.existsSync(devScriptPath)) {
+      backendProcess = spawnBackendProcess(python, [devScriptPath], backendEnv);
+      return await waitForServer();
+    }
+  }
+  const executableName = process.platform === 'win32' ? 'scherzo_serve.exe' : 'scherzo_serve';
+  const bundledPath = path.join(process.resourcesPath || '', 'backend', executableName);
+  if (fs.existsSync(bundledPath)) {
+    backendProcess = spawnBackendProcess(bundledPath, [], backendEnv);
+  } else {
+    console.error(`[Main] No backend found at ${bundledPath}`);
+    return false;
+  }
   return await waitForServer();
 }
 
@@ -136,7 +150,6 @@ function initDb(): sqlite3.Database {
 function createWindow() {
   const win = new BrowserWindow({
     width: 1400, height: 900, minWidth: 900, minHeight: 600,
-    titleBarStyle: 'hiddenInset',
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true, nodeIntegration: false,
@@ -156,11 +169,13 @@ app.whenReady().then(async () => {
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 
 const db = initDb();
-const dbQuery = (sql: string, params: any[] = []): Promise<any[]> => new Promise((res, rej) => {
-  db.all(sql, params, (err: Error | null, rows: any[]) => err ? rej(err) : res(rows));
+const dbQuery = (sql: string, params: unknown[] = []): Promise<unknown[]> => new Promise((res, rej) => {
+  db.all(sql, params, (err: Error | null, rows: unknown[]) => err ? rej(err) : res(rows));
 });
-const dbRun = (sql: string, params: any[] = []): Promise<any> => new Promise((res, rej) => {
-  db.run(sql, params, function(this: sqlite3.RunResult, err: Error | null) { err ? rej(err) : res({ id: this.lastID, changes: this.changes }); });
+const dbRun = (sql: string, params: unknown[] = []): Promise<{ id: number; changes: number }> => new Promise((res, rej) => {
+  db.run(sql, params, function(this: sqlite3.RunResult, err: Error | null) {
+    err ? rej(err) : res({ id: this.lastID, changes: this.changes });
+  });
 });
 
 function resolveHelperScript(scriptName: string): string | null {
@@ -182,10 +197,10 @@ function shellOutHelper(pythonPath: string, scriptName: string, payload: any): P
     const proc = spawn(pythonPath, [scriptPath], { stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
-    proc.stdout.on('data', d => { stdout += d.toString(); });
-    proc.stderr.on('data', d => { stderr += d.toString(); });
-    proc.on('error', (err) => resolve({ success: false, error: `Failed to spawn ${pythonPath}: ${err.message}` }));
-    proc.on('close', (code) => {
+    proc.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
+    proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+    proc.on('error', (err: Error) => resolve({ success: false, error: `Failed to spawn ${pythonPath}: ${err.message}` }));
+    proc.on('close', (code: number | null) => {
       if (code !== 0 && !stdout) {
         resolve({ success: false, error: stderr || `${scriptName} exited with code ${code}` });
         return;
@@ -224,7 +239,7 @@ function getPythonPath(): string | null {
 }
 
 // File-system IPC
-ipcMain.handle('readDirectory', async (_, dirPath: string) => {
+ipcMain.handle('readDirectory', async (_event: Electron.IpcMainInvokeEvent, dirPath: string) => {
   try {
     const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
     return entries.map(e => ({
@@ -232,65 +247,67 @@ ipcMain.handle('readDirectory', async (_, dirPath: string) => {
       size: e.isFile() ? fs.statSync(path.join(dirPath, e.name)).size : 0,
       modified: e.isFile() ? fs.statSync(path.join(dirPath, e.name)).mtime.toISOString() : '',
     }));
-  } catch (e) { return { error: (e as Error).message }; }
+  } catch (e: unknown) { return { error: (e as Error).message }; }
 });
-ipcMain.handle('ensureDirectory', async (_, dirPath: string) => {
+ipcMain.handle('ensureDirectory', async (_event: Electron.IpcMainInvokeEvent, dirPath: string) => {
   try { await fs.promises.mkdir(dirPath, { recursive: true }); return { success: true }; }
-  catch (e) { return { error: (e as Error).message }; }
+  catch (e: unknown) { return { error: (e as Error).message }; }
 });
 ipcMain.handle('getHomeDir', async () => os.homedir());
-ipcMain.handle('show-open-dialog', async (_, options) => {
+ipcMain.handle('show-open-dialog', async (_event: Electron.IpcMainInvokeEvent, options: Electron.OpenDialogOptions) => {
   const win = BrowserWindow.getFocusedWindow(); if (!win) return { canceled: true };
   return dialog.showOpenDialog(win, options);
 });
-ipcMain.handle('show-save-dialog', async (_, options) => {
+ipcMain.handle('show-save-dialog', async (_event: Electron.IpcMainInvokeEvent, options: Electron.SaveDialogOptions) => {
   const win = BrowserWindow.getFocusedWindow(); if (!win) return { canceled: true };
   return dialog.showSaveDialog(win, options);
 });
-ipcMain.handle('read-file-content', async (_, filePath: string) => {
+ipcMain.handle('read-file-content', async (_event: Electron.IpcMainInvokeEvent, filePath: string) => {
   try { const content = await fs.promises.readFile(filePath, 'utf-8'); return { content }; }
-  catch (e) { return { error: (e as Error).message }; }
+  catch (e: unknown) { return { error: (e as Error).message }; }
 });
-ipcMain.handle('write-file-content', async (_, filePath: string, content: string) => {
+ipcMain.handle('write-file-content', async (_event: Electron.IpcMainInvokeEvent, filePath: string, content: string) => {
   try { await fs.promises.writeFile(filePath, content, 'utf-8'); return { success: true }; }
-  catch (e) { return { error: (e as Error).message }; }
+  catch (e: unknown) { return { error: (e as Error).message }; }
 });
 
 // Repertoire IPC
 ipcMain.handle('repertoire:list', async () => dbQuery('SELECT id, title, composer, album, audio_path, source_url, source_type, duration_sec, created_at, updated_at FROM repertoire ORDER BY updated_at DESC, id DESC'));
-ipcMain.handle('repertoire:get', async (_, id) => {
+ipcMain.handle('repertoire:get', async (_event: Electron.IpcMainInvokeEvent, id: number) => {
   const row = (await dbQuery('SELECT * FROM repertoire WHERE id = ?', [id]))[0];
   if (!row) return null;
   const sheets = await dbQuery('SELECT id, name, length(musicxml) AS xml_length, created_at FROM repertoire_sheets WHERE repertoire_id = ? ORDER BY id ASC', [id]);
   return { ...row, sheets };
 });
-ipcMain.handle('repertoire:getSheetXml', async (_, sheetId) => {
-  const row = (await dbQuery('SELECT musicxml FROM repertoire_sheets WHERE id = ?', [sheetId]))[0];
+ipcMain.handle('repertoire:getSheetXml', async (_event: Electron.IpcMainInvokeEvent, sheetId: number) => {
+  const rows = await dbQuery('SELECT musicxml FROM repertoire_sheets WHERE id = ?', [sheetId]) as { musicxml: string }[];
+  const row = rows[0];
   return row ? row.musicxml : null;
 });
-ipcMain.handle('repertoire:create', async (_, { title, composer, audioPath, sourceUrl, sourceType }) => {
+ipcMain.handle('repertoire:create', async (_event: Electron.IpcMainInvokeEvent, { title, composer, audioPath, sourceUrl, sourceType }: { title: string; composer?: string; audioPath?: string; sourceUrl?: string; sourceType?: string }) => {
   const result: any = await dbRun('INSERT INTO repertoire (title, composer, audio_path, source_url, source_type) VALUES (?, ?, ?, ?, ?)', [title, composer, audioPath, sourceUrl, sourceType]);
   return { id: result.id };
 });
-ipcMain.handle('repertoire:update', async (_, { id, fields }) => {
+ipcMain.handle('repertoire:update', async (_event: Electron.IpcMainInvokeEvent, { id, fields }: { id: number; fields: Record<string, unknown> }) => {
   const keys = Object.keys(fields);
   if (keys.length === 0) return { success: false };
   const setClause = keys.map(k => `${k} = ?`).join(', ');
   await dbRun(`UPDATE repertoire SET ${setClause}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [...keys.map(k => fields[k]), id]);
   return { success: true };
 });
-ipcMain.handle('repertoire:delete', async (_, id) => {
-  const row = (await dbQuery('SELECT audio_path FROM repertoire WHERE id = ?', [id]))[0];
+ipcMain.handle('repertoire:delete', async (_event: Electron.IpcMainInvokeEvent, id: number) => {
+  const rows = await dbQuery('SELECT audio_path FROM repertoire WHERE id = ?', [id]) as { audio_path?: string }[];
+  const row = rows[0];
   if (row?.audio_path && fs.existsSync(row.audio_path)) fs.unlinkSync(row.audio_path);
   await dbRun('DELETE FROM repertoire_sheets WHERE repertoire_id = ?', [id]);
   await dbRun('DELETE FROM repertoire WHERE id = ?', [id]);
   return { success: true };
 });
-ipcMain.handle('repertoire:attachSheet', async (_, { repertoireId, name, musicxml }) => {
+ipcMain.handle('repertoire:attachSheet', async (_event: Electron.IpcMainInvokeEvent, { repertoireId, name, musicxml }: { repertoireId: number; name: string; musicxml: string }) => {
   const result: any = await dbRun('INSERT INTO repertoire_sheets (repertoire_id, name, musicxml) VALUES (?, ?, ?)', [repertoireId, name, musicxml]);
   return { id: result.id };
 });
-ipcMain.handle('repertoire:deleteSheet', async (_, sheetId) => {
+ipcMain.handle('repertoire:deleteSheet', async (_event: Electron.IpcMainInvokeEvent, sheetId: number) => {
   await dbRun('DELETE FROM repertoire_sheets WHERE id = ?', [sheetId]);
   return { success: true };
 });
@@ -306,16 +323,16 @@ ipcMain.handle('load_demo_tracks', async () => {
     const dir = candidates.find(p => fs.existsSync(p));
     if (!dir) return { success: false, error: 'demo_audio directory not found in app resources' };
     const files = fs.readdirSync(dir)
-      .filter(n => /\.(wav|mp3|ogg|flac|m4a|aac|aiff)$/i.test(n))
-      .map(n => ({ name: n, path: path.join(dir, n) }));
+      .filter((n: string) => /\.(wav|mp3|ogg|flac|m4a|aac|aiff)$/i.test(n))
+      .map((n: string) => ({ name: n, path: path.join(dir, n) }));
     return { success: true, tracks: files, dir };
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Error loading demo tracks:', error);
-    return { success: false, error: error.message };
+    return { success: false, error: (error as Error).message };
   }
 });
 
-ipcMain.handle('generate_music', async (_, { prompt, provider, model, duration, currentPath, workspacePath, baseFilename, apiKey }) => {
+ipcMain.handle('generate_music', async (_event: Electron.IpcMainInvokeEvent, { prompt, provider, model, duration, currentPath, workspacePath, baseFilename, apiKey }: { prompt: string; provider?: string; model?: string; duration?: number; currentPath?: string; workspacePath?: string; baseFilename?: string; apiKey?: string }) => {
   console.log(`[Main Process] Generate music: "${prompt}" provider=${provider} model=${model} dur=${duration}s`);
   if (!prompt) return { success: false, error: 'Prompt is required' };
 
@@ -335,9 +352,9 @@ ipcMain.handle('generate_music', async (_, { prompt, provider, model, duration, 
         return { success: false, error: data.error || `HTTP ${response.status}` };
       }
       return data;
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error generating music via backend:', error);
-      return { success: false, error: error.message || 'Music generation failed — is the backend running?' };
+      return { success: false, error: (error as Error).message || 'Music generation failed — is the backend running?' };
     }
   }
 
