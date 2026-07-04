@@ -61,6 +61,7 @@
       "!resources/scherzo_serve.py"
     ],
     "mac": {
+      "icon": "scherzo.png",
       "target": [
         {
           "target": "dmg",
@@ -72,9 +73,11 @@
       "category": "public.app-category.productivity"
     },
     "win": {
+      "icon": "scherzo.png",
       "target": "nsis"
     },
     "linux": {
+      "icon": "scherzo.png",
       "target": [
         "deb",
         "AppImage"
