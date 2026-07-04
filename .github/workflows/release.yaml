@@ -1,0 +1,73 @@
+name: Attach Artifacts to Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to attach (e.g., 0.1.0)'
+        required: true
+        type: string
+
+jobs:
+  attach-artifacts:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Extract version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+            VERSION="${TAG#v}"
+          else
+            VERSION="${{ inputs.version }}"
+            TAG="v${{ inputs.version }}"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Download artifacts from Google Cloud Storage
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          BASE_URL="https://storage.googleapis.com/scherzo-executables"
+          mkdir -p artifacts
+
+          FILES="linux-x64/scherzo_${VERSION}_x64.deb
+          linux-x64/scherzo_${VERSION}_x64.AppImage
+          windows-x64/scherzo_${VERSION}_x64.exe
+          macos-arm64/scherzo_${VERSION}_arm64.dmg
+          macos-arm64/scherzo_${VERSION}_arm64.zip"
+
+          for gcs_path in $FILES; do
+            filename=$(basename "$gcs_path")
+            url="${BASE_URL}/${gcs_path}"
+            echo "Downloading $url ..."
+            if curl -fSL --retry 3 --retry-delay 5 -o "artifacts/$filename" "$url"; then
+              echo "  -> Downloaded $filename ($(stat -c%s "artifacts/$filename") bytes)"
+            else
+              echo "  -> WARNING: Failed to download $filename (may not exist yet)"
+              rm -f "artifacts/$filename"
+            fi
+          done
+
+      - name: Attach artifacts to release
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          ATTACHED=0
+          for file in artifacts/*; do
+            if [ -f "$file" ]; then
+              filesize=$(stat -c%s "$file")
+              if [ $filesize -gt 1000 ]; then
+                echo "Attaching $(basename "$file") ($filesize bytes) to release $TAG"
+                gh release upload "$TAG" "$file" --repo "$GITHUB_REPOSITORY" --clobber
+                ATTACHED=$((ATTACHED + 1))
+              else
+                echo "Skipping $(basename "$file") — too small ($filesize bytes), likely an error page"
+              fi
+            fi
+          done
+          echo "Attached $ATTACHED artifacts to release $TAG"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
