@@ -48,7 +48,7 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt pyinstaller
 
-      - run: npm ci --legacy-peer-deps
+      - run: npm install --legacy-peer-deps
 
       - name: Build PyInstaller binary (Linux)
         if: runner.os == 'Linux'
