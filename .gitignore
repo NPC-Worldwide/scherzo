@@ -8,3 +8,4 @@ pyinstaller_dist
 
 .nanocoder
 .nanocoder/
+.knowledge.yaml
