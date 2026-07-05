@@ -6,3 +6,5 @@ pyinstaller_dist
 *.log
 .DS_Store
 
+.nanocoder
+.nanocoder/
