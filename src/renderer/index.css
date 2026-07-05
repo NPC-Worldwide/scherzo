@@ -102,3 +102,17 @@ body {
   background: rgba(100,100,100,0.3);
   border-radius: 2px;
 }
+
+.theme-input {
+  background-color: var(--theme-input-bg);
+  border: 1px solid var(--theme-input-border);
+  color: var(--theme-text);
+  border-radius: 4px;
+  outline: none;
+}
+.theme-input:focus {
+  border-color: var(--theme-primary);
+}
+.theme-input::placeholder {
+  color: var(--theme-text-muted);
+}

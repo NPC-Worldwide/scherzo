@@ -8,6 +8,8 @@ export interface IElectronAPI {
   showSaveDialog: (options: any) => Promise<any>;
   readFileContent: (filePath: string) => Promise<any>;
   writeFileContent: (filePath: string, content: string) => Promise<any>;
+  readFileBuffer: (filePath: string) => Promise<any>;
+  writeFileBuffer: (filePath: string, data: Uint8Array) => Promise<any>;
   repertoireList: () => Promise<any>;
   repertoireGet: (id: number) => Promise<any>;
   repertoireGetSheetXml: (sheetId: number) => Promise<any>;
@@ -19,6 +21,24 @@ export interface IElectronAPI {
   generateMusic: (prompt: string, provider: string, model: string, duration: number, currentPath: string | undefined, opts?: { workspacePath?: string; baseFilename?: string; apiKey?: string }) => Promise<any>;
   loadDemoTracks: () => Promise<any>;
   proxyFetch: (url: string, options?: any) => Promise<any>;
+  libraryIndexFolder: (folderPath: string) => Promise<any>;
+  libraryRemoveIndexedFolder: (folderId: number) => Promise<any>;
+  libraryListIndexedFolders: () => Promise<any>;
+  libraryListTracks: (opts?: { search?: string; sort?: string; offset?: number; limit?: number }) => Promise<any>;
+  libraryGetTrack: (id: number) => Promise<any>;
+  libraryLikeTrack: (id: number, liked: boolean) => Promise<any>;
+  libraryLikedTracks: () => Promise<any>;
+  libraryYoutubeSearch: (query: string) => Promise<any>;
+  libraryYoutubeDownload: (videoUrl: string, outputDir: string) => Promise<any>;
+  libraryRadioRecommendations: (seedId: string) => Promise<any>;
+  playlistList: () => Promise<any>;
+  playlistCreate: (name: string) => Promise<any>;
+  playlistDelete: (id: number) => Promise<any>;
+  playlistRename: (id: number, name: string) => Promise<any>;
+  playlistGetTracks: (playlistId: number) => Promise<any>;
+  playlistAddTrack: (playlistId: number, trackId: number) => Promise<any>;
+  playlistRemoveTrack: (ptId: number) => Promise<any>;
+  playlistReorder: (playlistId: number, trackIds: number[]) => Promise<any>;
 }
 
 contextBridge.exposeInMainWorld('api', {
@@ -29,6 +49,8 @@ contextBridge.exposeInMainWorld('api', {
   showSaveDialog: (options: any) => ipcRenderer.invoke('show-save-dialog', options),
   readFileContent: (filePath: string) => ipcRenderer.invoke('read-file-content', filePath),
   writeFileContent: (filePath: string, content: string) => ipcRenderer.invoke('write-file-content', filePath, content),
+  readFileBuffer: (filePath: string) => ipcRenderer.invoke('read-file-buffer', filePath),
+  writeFileBuffer: (filePath: string, data: Uint8Array) => ipcRenderer.invoke('write-file-buffer', filePath, data),
   repertoireList: () => ipcRenderer.invoke('repertoire:list'),
   repertoireGet: (id: number) => ipcRenderer.invoke('repertoire:get', id),
   repertoireGetSheetXml: (sheetId: number) => ipcRenderer.invoke('repertoire:getSheetXml', sheetId),
@@ -41,6 +63,24 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.invoke('generate_music', { prompt, provider, model, duration, currentPath, workspacePath: opts.workspacePath, baseFilename: opts.baseFilename, apiKey: opts.apiKey }),
   loadDemoTracks: () => ipcRenderer.invoke('load_demo_tracks'),
   proxyFetch: (url: string, options?: any) => ipcRenderer.invoke('proxy-fetch', url, options),
+  libraryIndexFolder: (folderPath: string) => ipcRenderer.invoke('library:indexFolder', folderPath),
+  libraryRemoveIndexedFolder: (folderId: number) => ipcRenderer.invoke('library:removeIndexedFolder', folderId),
+  libraryListIndexedFolders: () => ipcRenderer.invoke('library:listIndexedFolders'),
+  libraryListTracks: (opts?: any) => ipcRenderer.invoke('library:listTracks', opts),
+  libraryGetTrack: (id: number) => ipcRenderer.invoke('library:getTrack', id),
+  libraryLikeTrack: (id: number, liked: boolean) => ipcRenderer.invoke('library:likeTrack', id, liked),
+  libraryLikedTracks: () => ipcRenderer.invoke('library:likedTracks'),
+  libraryYoutubeSearch: (query: string) => ipcRenderer.invoke('library:youtubeSearch', query),
+  libraryYoutubeDownload: (videoUrl: string, outputDir: string) => ipcRenderer.invoke('library:youtubeDownload', videoUrl, outputDir),
+  libraryRadioRecommendations: (seedId: string) => ipcRenderer.invoke('library:radioRecommendations', seedId),
+  playlistList: () => ipcRenderer.invoke('playlist:list'),
+  playlistCreate: (name: string) => ipcRenderer.invoke('playlist:create', name),
+  playlistDelete: (id: number) => ipcRenderer.invoke('playlist:delete', id),
+  playlistRename: (id: number, name: string) => ipcRenderer.invoke('playlist:rename', id, name),
+  playlistGetTracks: (playlistId: number) => ipcRenderer.invoke('playlist:getTracks', playlistId),
+  playlistAddTrack: (playlistId: number, trackId: number) => ipcRenderer.invoke('playlist:addTrack', playlistId, trackId),
+  playlistRemoveTrack: (ptId: number) => ipcRenderer.invoke('playlist:removeTrack', ptId),
+  playlistReorder: (playlistId: number, trackIds: number[]) => ipcRenderer.invoke('playlist:reorder', playlistId, trackIds),
 } as IElectronAPI);
 
 declare global {

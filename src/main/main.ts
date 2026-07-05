@@ -3,7 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import sqlite3 from 'sqlite3';
-import { spawn } from 'child_process';
+import { spawn, exec, execSync } from 'child_process';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -144,6 +144,38 @@ function initDb(): sqlite3.Database {
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (repertoire_id) REFERENCES repertoire(id) ON DELETE CASCADE
   )`);
+  db.run(`CREATE TABLE IF NOT EXISTS indexed_folders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    path TEXT UNIQUE NOT NULL,
+    label TEXT,
+    added_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+  db.run(`CREATE TABLE IF NOT EXISTS library_tracks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    path TEXT UNIQUE NOT NULL,
+    title TEXT, artist TEXT, album TEXT,
+    duration REAL, file_size INTEGER,
+    source TEXT DEFAULT 'local',
+    source_url TEXT, yt_video_id TEXT,
+    liked INTEGER DEFAULT 0,
+    added_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+  db.run(`CREATE TABLE IF NOT EXISTS playlists (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    description TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+  db.run(`CREATE TABLE IF NOT EXISTS playlist_tracks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    playlist_id INTEGER NOT NULL,
+    track_id INTEGER NOT NULL,
+    position INTEGER NOT NULL,
+    added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE,
+    FOREIGN KEY (track_id) REFERENCES library_tracks(id) ON DELETE CASCADE
+  )`);
   return db;
 }
 
@@ -169,6 +201,7 @@ app.whenReady().then(async () => {
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 
 const db = initDb();
+console.log('[Main] DB initialized, registering handlers...');
 const dbQuery = (sql: string, params: unknown[] = []): Promise<unknown[]> => new Promise((res, rej) => {
   db.all(sql, params, (err: Error | null, rows: unknown[]) => err ? rej(err) : res(rows));
 });
@@ -212,14 +245,206 @@ function shellOutHelper(pythonPath: string, scriptName: string, payload: any): P
         resolve({ success: false, error: `Could not parse helper output: ${(err as Error).message}. stderr: ${stderr}` });
       }
     });
-    try {
-      proc.stdin.write(JSON.stringify(payload));
-      proc.stdin.end();
-    } catch (err) {
-      resolve({ success: false, error: `Failed to write to helper stdin: ${(err as Error).message}` });
-    }
   });
 }
+
+// ── Library IPC ──────────────────────────────────────────────
+console.log('[Main] Registering library IPC handlers...');
+
+ipcMain.handle('library:indexFolder', async (_e, folderPath: string) => {
+  try {
+    const stats = fs.statSync(folderPath);
+    if (!stats.isDirectory()) return { success: false, error: 'Not a directory' };
+    const label = path.basename(folderPath);
+    dbRun('INSERT OR IGNORE INTO indexed_folders (path, label) VALUES (?, ?)', [folderPath, label]);
+
+    const audioExts = new Set(['mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac', 'wma', 'aiff', 'webm', 'opus']);
+    const added: string[] = [];
+
+    function walk(dir: string) {
+      let entries: fs.Dirent[];
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) { walk(full); continue; }
+        const ext = e.name.split('.').pop()?.toLowerCase() || '';
+        if (!audioExts.has(ext)) continue;
+        try {
+          const stat = fs.statSync(full);
+          dbRun('INSERT OR IGNORE INTO library_tracks (path, title, file_size) VALUES (?, ?, ?)',
+            [full, e.name.replace(/\.[^.]+$/, ''), stat.size]);
+          added.push(full);
+        } catch {}
+      }
+    }
+    walk(folderPath);
+    return { success: true, added };
+  } catch (e: any) { return { success: false, error: e.message }; }
+});
+
+ipcMain.handle('library:removeIndexedFolder', async (_e, folderId: number) => {
+  try {
+    const rows = await dbQuery('SELECT path FROM indexed_folders WHERE id = ?', [folderId]) as any[];
+    if (rows[0]) {
+      dbRun('DELETE FROM library_tracks WHERE path LIKE ?', [rows[0].path + '%']);
+    }
+    dbRun('DELETE FROM indexed_folders WHERE id = ?', [folderId]);
+    return { success: true };
+  } catch (e: any) { return { success: false, error: e.message }; }
+});
+
+ipcMain.handle('library:listIndexedFolders', async () => {
+  try { return await dbQuery('SELECT * FROM indexed_folders ORDER BY added_at DESC'); }
+  catch (e: any) { return []; }
+});
+
+ipcMain.handle('library:listTracks', async (_e, opts?: { search?: string; sort?: string; offset?: number; limit?: number }) => {
+  console.log('[Main] library:listTracks HANDLER CALLED');
+  try {
+    let sql = 'SELECT * FROM library_tracks WHERE 1=1';
+    const params: any[] = [];
+    if (opts?.search) { sql += ' AND (title LIKE ? OR artist LIKE ? OR album LIKE ?)'; params.push(`%${opts.search}%`, `%${opts.search}%`, `%${opts.search}%`); }
+    sql += ` ORDER BY ${opts?.sort === 'title' ? 'title' : opts?.sort === 'artist' ? 'artist' : opts?.sort === 'album' ? 'album' : 'added_at'} DESC`;
+    if (opts?.limit) { sql += ' LIMIT ?'; params.push(opts.limit); if (opts.offset) { sql += ' OFFSET ?'; params.push(opts.offset); } }
+    return await dbQuery(sql, params);
+  } catch (e: any) { return []; }
+});
+
+ipcMain.handle('library:getTrack', async (_e, id: number) => {
+  try { const rows = await dbQuery('SELECT * FROM library_tracks WHERE id = ?', [id]); return rows[0] || null; }
+  catch { return null; }
+});
+
+ipcMain.handle('library:likeTrack', async (_e, id: number, liked: boolean) => {
+  try { await dbRun('UPDATE library_tracks SET liked = ? WHERE id = ?', [liked ? 1 : 0, id]); return { success: true }; }
+  catch (e: any) { return { success: false, error: e.message }; }
+});
+
+ipcMain.handle('library:likedTracks', async () => {
+  try { return await dbQuery('SELECT * FROM library_tracks WHERE liked = 1 ORDER BY added_at DESC'); }
+  catch { return []; }
+});
+
+// ── YouTube IPC ──────────────────────────────────────────────
+
+function findYtDlp(): string | null {
+  try { return execSync('which yt-dlp 2>/dev/null', { encoding: 'utf8' }).trim(); } catch {}
+  try { return execSync('where yt-dlp 2>nul', { encoding: 'utf8' }).trim(); } catch {}
+  return null;
+}
+
+ipcMain.handle('library:youtubeSearch', async (_e, query: string) => {
+  const ytdlp = findYtDlp();
+  if (!ytdlp) return { success: false, error: 'yt-dlp not found. Install with: brew install yt-dlp' };
+  return new Promise((resolve) => {
+    exec(`"${ytdlp}" "ytsearch10:${query}" --flat-playlist --dump-json --no-playlist --ignore-errors`, {
+      timeout: 15000, maxBuffer: 1024 * 1024,
+    }, (err, stdout) => {
+      if (err && !stdout) { resolve({ success: false, error: err.message }); return; }
+      const results = (stdout || '').trim().split('\n').filter(Boolean).map((line: string) => {
+        try {
+          const j = JSON.parse(line);
+          return { id: j.id, title: j.title, duration: j.duration, uploader: j.uploader || j.channel, url: j.webpage_url || `https://youtube.com/watch?v=${j.id}` };
+        } catch { return null; }
+      }).filter(Boolean);
+      resolve({ success: true, results });
+    });
+  });
+});
+
+ipcMain.handle('library:youtubeDownload', async (_e, videoUrl: string, outputDir: string) => {
+  const ytdlp = findYtDlp();
+  if (!ytdlp) return { success: false, error: 'yt-dlp not found' };
+  fs.mkdirSync(outputDir, { recursive: true });
+  return new Promise((resolve) => {
+    exec(`"${ytdlp}" "${videoUrl}" -x --audio-format mp3 --audio-quality 0 -o "${outputDir}/%(title)s.%(ext)s" --print filename --no-playlist`, {
+      timeout: 600000, maxBuffer: 1024 * 1024,
+    }, (err, stdout) => {
+      if (err && !stdout) { resolve({ success: false, error: err.message }); return; }
+      const filename = (stdout || '').trim().split('\n').pop()?.trim() || '';
+      if (!filename || !fs.existsSync(filename)) { resolve({ success: false, error: `Download failed: ${stdout?.slice(0, 200)}` }); return; }
+      const title = path.basename(filename, path.extname(filename));
+      const stat = fs.statSync(filename);
+      const videoId = videoUrl.split('v=')[1]?.split('&')[0] || '';
+      dbRun('INSERT OR IGNORE INTO library_tracks (path, title, source, source_url, yt_video_id, file_size) VALUES (?, ?, ?, ?, ?, ?)',
+        [filename, title, 'youtube', videoUrl, videoId, stat.size]);
+      resolve({ success: true, path: filename, title });
+    });
+  });
+});
+
+// ── Radio IPC ──────────────────────────────────────────────
+
+ipcMain.handle('library:radioRecommendations', async (_e, seedId: string) => {
+  const ytdlp = findYtDlp();
+  if (!ytdlp) return { success: false, error: 'yt-dlp not found' };
+  return new Promise((resolve) => {
+    exec(`"${ytdlp}" "https://music.youtube.com/watch?v=${seedId}" --flat-playlist --dump-json --playlist-end 20 --ignore-errors`, {
+      timeout: 15000, maxBuffer: 1024 * 1024,
+    }, (err, stdout) => {
+      if (err && !stdout) { resolve({ success: false, error: err.message }); return; }
+      const results = (stdout || '').trim().split('\n').filter(Boolean).map((line: string) => {
+        try {
+          const j = JSON.parse(line);
+          return { id: j.id, title: j.title, duration: j.duration, uploader: j.uploader || j.channel, url: j.webpage_url || `https://youtube.com/watch?v=${j.id}` };
+        } catch { return null; }
+      }).filter(Boolean);
+      resolve({ success: true, results });
+    });
+  });
+});
+
+// ── Playlist IPC ─────────────────────────────────────────────
+
+ipcMain.handle('playlist:list', async () => {
+  try { return await dbQuery('SELECT * FROM playlists ORDER BY updated_at DESC'); }
+  catch { return []; }
+});
+
+ipcMain.handle('playlist:create', async (_e, name: string) => {
+  try { const r: any = await dbRun('INSERT INTO playlists (name) VALUES (?)', [name]); return { success: true, id: r.id }; }
+  catch (e: any) { return { success: false, error: e.message }; }
+});
+
+ipcMain.handle('playlist:delete', async (_e, id: number) => {
+  try { await dbRun('DELETE FROM playlists WHERE id = ?', [id]); return { success: true }; }
+  catch (e: any) { return { success: false, error: e.message }; }
+});
+
+ipcMain.handle('playlist:rename', async (_e, id: number, name: string) => {
+  try { await dbRun('UPDATE playlists SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [name, id]); return { success: true }; }
+  catch (e: any) { return { success: false, error: e.message }; }
+});
+
+ipcMain.handle('playlist:getTracks', async (_e, playlistId: number) => {
+  try { return await dbQuery('SELECT t.*, pt.position, pt.id as pt_id FROM library_tracks t JOIN playlist_tracks pt ON t.id = pt.track_id WHERE pt.playlist_id = ? ORDER BY pt.position', [playlistId]); }
+  catch { return []; }
+});
+
+ipcMain.handle('playlist:addTrack', async (_e, playlistId: number, trackId: number) => {
+  try {
+    const rows: any = await dbQuery('SELECT MAX(position) as maxPos FROM playlist_tracks WHERE playlist_id = ?', [playlistId]);
+    const pos = (rows[0]?.maxPos ?? 0) + 1;
+    await dbRun('INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position) VALUES (?, ?, ?)', [playlistId, trackId, pos]);
+    await dbRun('UPDATE playlists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?', [playlistId]);
+    return { success: true };
+  } catch (e: any) { return { success: false, error: e.message }; }
+});
+
+ipcMain.handle('playlist:removeTrack', async (_e, ptId: number) => {
+  try { await dbRun('DELETE FROM playlist_tracks WHERE id = ?', [ptId]); return { success: true }; }
+  catch (e: any) { return { success: false, error: e.message }; }
+});
+
+ipcMain.handle('playlist:reorder', async (_e, playlistId: number, trackIds: number[]) => {
+  try {
+    const stmt = db.prepare('UPDATE playlist_tracks SET position = ? WHERE id = ? AND playlist_id = ?');
+    trackIds.forEach((ptId, i) => stmt.run(i + 1, ptId, playlistId));
+    stmt.finalize();
+    await dbRun('UPDATE playlists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?', [playlistId]);
+    return { success: true };
+  } catch (e: any) { return { success: false, error: e.message }; }
+});
 
 function getPythonPath(): string | null {
   const candidates = [
@@ -268,6 +493,17 @@ ipcMain.handle('read-file-content', async (_event: Electron.IpcMainInvokeEvent, 
 });
 ipcMain.handle('write-file-content', async (_event: Electron.IpcMainInvokeEvent, filePath: string, content: string) => {
   try { await fs.promises.writeFile(filePath, content, 'utf-8'); return { success: true }; }
+  catch (e: unknown) { return { error: (e as Error).message }; }
+});
+ipcMain.handle('read-file-buffer', async (_event: Electron.IpcMainInvokeEvent, filePath: string) => {
+  try {
+    const buf = fs.readFileSync(filePath);
+    return { data: buf.toString('base64') };
+  }
+  catch (e: unknown) { return { error: (e as Error).message }; }
+});
+ipcMain.handle('write-file-buffer', async (_event: Electron.IpcMainInvokeEvent, filePath: string, data: Uint8Array) => {
+  try { fs.writeFileSync(filePath, Buffer.from(data)); return { success: true }; }
   catch (e: unknown) { return { error: (e as Error).message }; }
 });
 
@@ -346,7 +582,8 @@ ipcMain.handle('generate_music', async (_event: Electron.IpcMainInvokeEvent, { p
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt, provider, model, duration, currentPath }),
-      });
+});
+console.log('[Main] All handlers registered');
       const data = await response.json();
       if (!response.ok || !data.success) {
         return { success: false, error: data.error || `HTTP ${response.status}` };

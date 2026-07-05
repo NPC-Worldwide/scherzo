@@ -10,7 +10,8 @@ import {
     FastForward, Rewind, RotateCcw, Shuffle, Repeat, Heart,
     PlusCircle, FolderOpen, Clock, Activity, AudioLines, Piano,
     Guitar, ChevronLeft, Star, Package, Layers, FileJson, Tag,
-    RefreshCw, Lock, Unlock, Move, MousePointer, Magnet
+    RefreshCw, Lock, Unlock, Move, MousePointer, Magnet,
+    Youtube, ListPlus, AlignJustify, LayoutGrid, FolderPlus
 } from 'lucide-react';
 import {
     Renderer as VFRenderer, Stave, StaveNote, Voice, Formatter,
@@ -18,6 +19,11 @@ import {
 } from 'vexflow';
 import { demoScores, DemoScore } from '../lib/scherzoLibrary';
 import JSZip from 'jszip';
+import RadioPanel from './RadioPanel';
+import LibraryPanel from './LibraryPanel';
+import DJMixerPanel from './DJMixerPanel';
+import NotationPanel from './NotationPanel';
+import EditorPanel from './EditorPanel';
 
 interface ScherzoProps {
     currentPath?: string;
@@ -208,6 +214,61 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
     const [editorZoom, setEditorZoom] = useState(1);
     const [editorPosition, setEditorPosition] = useState(0);
     const [isRecording, setIsRecording] = useState(false);
+    const [recordingWaveform, setRecordingWaveform] = useState<number[]>([]);
+    const recordingWaveAnimRef = useRef<number | null>(null);
+    const recordingAnalyserRef = useRef<AnalyserNode | null>(null);
+    const recordingAudioCtxRef = useRef<AudioContext | null>(null);
+    const recordingWaveCanvasRef = useRef<HTMLCanvasElement | null>(null);
+    const recordingStartDrawRef = useRef<(() => void) | null>(null);
+    const recordingClipRef = useRef<HTMLDivElement | null>(null);
+    const recordingHistoryRef = useRef<number[]>([]);
+    const recordingStartTimeRef = useRef(0);
+    const recordingPlayheadStartRef = useRef(0);
+
+    // ── Library state ──────────────────────────────
+    const [libTracks, setLibTracks] = useState<any[]>([]);
+    const [libPlaylists, setLibPlaylists] = useState<any[]>([]);
+    const [libQueue, setLibQueue] = useState<any[]>([]);
+    const [libQueueIndex, setLibQueueIndex] = useState(-1);
+    const [libIndexedFolders, setLibIndexedFolders] = useState<any[]>([]);
+    const [libViewMode, setLibViewMode] = useState<'table' | 'grid'>('table');
+    const [libSort, setLibSort] = useState('added_at');
+    const [libSearch, setLibSearch] = useState('');
+    const [libSelectedPlaylist, setLibSelectedPlaylist] = useState<number | null>(null);
+    const [libPlaylistTracks, setLibPlaylistTracks] = useState<any[]>([]);
+    const [libYtResults, setLibYtResults] = useState<any[]>([]);
+    const [libYtSearching, setLibYtSearching] = useState(false);
+    const [libYtDownloading, setLibYtDownloading] = useState<string | null>(null);
+    const [libIndexing, setLibIndexing] = useState(false);
+    const [libShowYtSearch, setLibShowYtSearch] = useState(false);
+    const [libNewPlaylistName, setLibNewPlaylistName] = useState('');
+    const [libRefreshing, setLibRefreshing] = useState(false);
+    const [libYtMusicToken, setLibYtMusicToken] = useState('');
+    const [libLastFmToken, setLibLastFmToken] = useState('');
+    const [libRadioFavorites, setLibRadioFavorites] = useState<any[]>(() => {
+        try { return JSON.parse(localStorage.getItem('scherzo_radio_favorites') || '[]'); } catch { return []; }
+    });
+    const [libRadioActive, setLibRadioActive] = useState(false);
+    const [libRadioStation, setLibRadioStation] = useState<any>(null);
+
+    const playNextInQueue = useCallback(() => {
+        if (libQueue.length === 0) return;
+        const next = libQueueIndex + 1;
+        if (next < libQueue.length) {
+            setLibQueueIndex(next);
+            const track = libQueue[next];
+            if (audioRef.current && track.path) {
+                audioRef.current.src = `file://${track.path}`;
+                audioRef.current.play();
+                setIsPlaying(true);
+                setSelectedAudio({ id: track.id?.toString() || '', name: track.title || '', path: track.path, duration: track.duration });
+            }
+        } else {
+            setLibQueueIndex(-1);
+            setLibQueue([]);
+        }
+    }, [libQueue, libQueueIndex]);
+
     const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -430,6 +491,36 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
     }, [sidebarCollapsed]);
 
     useEffect(() => {
+        if (activeMode === 'dj') {
+            setSidebarCollapsed(true);
+        }
+    }, [activeMode]);
+
+    useEffect(() => {
+        if (isRecording && activeMode !== 'editor') {
+            mediaRecorderRef.current?.stop();
+            setIsRecording(false);
+            setRecordingWaveform([]);
+            if (recordingWaveAnimRef.current) {
+                cancelAnimationFrame(recordingWaveAnimRef.current);
+                recordingWaveAnimRef.current = null;
+            }
+            if (recordingAudioCtxRef.current) {
+                recordingAudioCtxRef.current.close();
+                recordingAudioCtxRef.current = null;
+            }
+            recordingAnalyserRef.current = null;
+        }
+    }, [activeMode, isRecording]);
+
+    useEffect(() => {
+        if (isRecording && recordingStartDrawRef.current) {
+            recordingStartDrawRef.current();
+            recordingStartDrawRef.current = null;
+        }
+    }, [isRecording]);
+
+    useEffect(() => {
         if (audioSource) {
             loadAudioFiles(audioSource);
         }
@@ -600,6 +691,31 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
         };
     }, [visualizerActive, visualizerMode, visualizerColor, isPlaying, deckA.playing]);
 
+    const refreshLibrary = useCallback(async () => {
+        const api = window.api;
+        if (!api) return;
+        setLibRefreshing(true);
+        try {
+            const [tracks, playlists, folders] = await Promise.all([
+                api.libraryListTracks?.({ sort: libSort }) || [],
+                api.playlistList?.() || [],
+                api.libraryListIndexedFolders?.() || [],
+            ]);
+            setLibTracks(tracks);
+            setLibPlaylists(playlists);
+            setLibIndexedFolders(folders);
+        } catch (e) { console.error('library refresh error:', e); }
+        setLibRefreshing(false);
+    }, [libSort]);
+
+    useEffect(() => { refreshLibrary(); }, []);
+
+    useEffect(() => {
+        if (libSelectedPlaylist !== null) {
+            window.api?.playlistGetTracks?.(libSelectedPlaylist).then(setLibPlaylistTracks);
+        }
+    }, [libSelectedPlaylist]);
+
     const loadAudioFiles = async (source: string) => {
         try {
 
@@ -707,6 +823,61 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
         }
     }, []);
 
+    const readAudioBuffer = async (filePath: string): Promise<ArrayBuffer | null> => {
+        const result = await window.api?.readFileBuffer?.(filePath);
+        if (!result?.data) return null;
+        const binaryStr = atob(result.data);
+        const bytes = new Uint8Array(binaryStr.length);
+        for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+        return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    };
+
+    const loadWaveform = useCallback(async (audioPath: string, audioId: string) => {
+        if (waveformCache.has(audioId)) return waveformCache.get(audioId);
+        try {
+            const ab = await readAudioBuffer(audioPath);
+            if (!ab) return null;
+            const audioContext = new AudioContext();
+            const audioBuffer = await audioContext.decodeAudioData(ab);
+            const channelData = audioBuffer.getChannelData(0);
+            const duration = audioBuffer.duration;
+            const hiResSamples = Math.min(Math.ceil(duration * 1000), 50000);
+            const blockSize = Math.floor(channelData.length / hiResSamples);
+            const hiResWaveform = new Float32Array(hiResSamples * 2);
+            for (let i = 0; i < hiResSamples; i++) {
+                let min = 1, max = -1;
+                const start = i * blockSize;
+                const end = Math.min(start + blockSize, channelData.length);
+                for (let j = start; j < end; j++) {
+                    const val = channelData[j];
+                    if (val < min) min = val;
+                    if (val > max) max = val;
+                }
+                hiResWaveform[i * 2] = min;
+                hiResWaveform[i * 2 + 1] = max;
+            }
+            setWaveformDataCache(prev => new Map(prev).set(audioId, hiResWaveform));
+            const samples = 200;
+            const thumbBlockSize = Math.floor(channelData.length / samples);
+            const waveform: number[] = [];
+            for (let i = 0; i < samples; i++) {
+                let sum = 0;
+                for (let j = 0; j < thumbBlockSize; j++) {
+                    sum += Math.abs(channelData[i * thumbBlockSize + j]);
+                }
+                waveform.push(sum / thumbBlockSize);
+            }
+            const maxVal = Math.max(...waveform);
+            const normalized = waveform.map(v => v / (maxVal || 1));
+            setWaveformCache(prev => new Map(prev).set(audioId, normalized));
+            audioContext.close();
+            return normalized;
+        } catch (err) {
+            console.error('Error loading waveform:', err);
+            return null;
+        }
+    }, []);
+
     const AUDIO_MODELS = [
         { id: 'replicate:meta/musicgen',           name: 'MusicGen (Replicate)',       provider: 'replicate', backendModel: 'meta/musicgen',               type: 'music' },
         { id: 'replicate:stackadoc/stable-audio-open-1.0', name: 'Stable Audio Open (Replicate)', provider: 'replicate', backendModel: 'stackadoc/stable-audio-open-1.0', type: 'music' },
@@ -718,18 +889,12 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
         { id: 'tts:elevenlabs',                    name: 'ElevenLabs Voice',           provider: 'elevenlabs',backendModel: 'elevenlabs',                  type: 'speech' },
     ];
 
-    const ALL_SCHERZO_MODES = [
-        { id: 'library', name: 'Library', icon: Library, group: 'browse' },
-        { id: 'repertoire', name: 'Repertoire', icon: ListMusic, group: 'browse' },
-        { id: 'generator', name: 'Generate', icon: Sparkles, group: 'create' },
-        { id: 'editor', name: 'Editor', icon: Waves, group: 'edit' },
-        { id: 'beats', name: 'Beat Maker', icon: Grid, group: 'create' },
-        { id: 'dj', name: 'DJ Mixer', icon: Disc3, group: 'edit' },
-        { id: 'analysis', name: 'Analysis', icon: Activity, group: 'analyze' },
-        { id: 'notation', name: 'Notation', icon: Music2, group: 'analyze' },
-        { id: 'datasets', name: 'Datasets', icon: Package, group: 'train' }
+    const SCHERZO_MODES = [
+        { id: 'library', name: 'Listen', icon: Library, group: '' },
+        { id: 'editor', name: 'Record', icon: Waves, group: '' },
+        { id: 'dj', name: 'Mix', icon: Disc3, group: '' },
+        { id: 'notation', name: 'Write', icon: Music2, group: '' }
     ];
-    const SCHERZO_MODES = aiEnabled ? ALL_SCHERZO_MODES : ALL_SCHERZO_MODES.filter(m => m.id !== 'generator');
 
     const currentMode_obj = SCHERZO_MODES.find(m => m.id === activeMode) || SCHERZO_MODES[0];
     const CurrentModeIcon = currentMode_obj.icon;
@@ -888,7 +1053,7 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
                             src={selectedAudio ? `file://${selectedAudio.path}` : ''}
                             onTimeUpdate={(e) => setCurrentTime((e.target as HTMLAudioElement).currentTime)}
                             onLoadedMetadata={(e) => setDuration((e.target as HTMLAudioElement).duration)}
-                            onEnded={() => setIsPlaying(false)}
+                            onEnded={() => { setIsPlaying(false); playNextInQueue(); }}
                         />
                     </div>
                 )}
@@ -1024,8 +1189,10 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
         try {
             let xmlText: string;
             if (/\.mxl$/i.test(picked)) {
-                const buffer = await api.readFileBuffer(picked);
-                const zip = await JSZip.loadAsync(buffer);
+                const result = await api.readFileBuffer(picked);
+                if (!result?.data) { alert('Failed to read file'); return; }
+                const bin = Uint8Array.from(atob(result.data), c => c.charCodeAt(0));
+                const zip = await JSZip.loadAsync(bin);
                 const containerFile = zip.file('META-INF/container.xml');
                 let rootPath: string | null = null;
                 if (containerFile) {
@@ -1173,640 +1340,6 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
         }
     };
 
-    const renderRepertoire = () => {
-        return (
-            <div className="flex-1 flex overflow-hidden">
-                {/* Left rail — list */}
-                <div className="w-64 shrink-0 border-r theme-border flex flex-col">
-                    <div className="px-3 py-2 border-b theme-border flex items-center justify-between">
-                        <span className="text-xs font-semibold uppercase theme-text-muted">Repertoire</span>
-                        <button
-                            onClick={repertoireImportLocal}
-                            className="p-1 theme-hover rounded"
-                            title="Add audio file"
-                        >
-                            <Plus size={14}/>
-                        </button>
-                    </div>
-                    <div className="px-2 py-2 border-b theme-border space-y-1">
-                        <input
-                            type="text"
-                            value={repertoireYouTubeUrl}
-                            onChange={(e) => setRepertoireYouTubeUrl(e.target.value)}
-                            placeholder="Paste YouTube URL…"
-                            className="theme-input text-xs w-full"
-                            disabled={repertoireDownloading}
-                            onKeyDown={(e) => { if (e.key === 'Enter') repertoireDownload(); }}
-                        />
-                        <button
-                            onClick={repertoireDownload}
-                            disabled={repertoireDownloading || !repertoireYouTubeUrl.trim()}
-                            className={`w-full text-xs py-1 rounded flex items-center justify-center gap-1 ${
-                                repertoireDownloading
-                                    ? 'theme-bg-tertiary opacity-50'
-                                    : 'bg-purple-600 text-white hover:bg-purple-500 disabled:opacity-40'
-                            }`}
-                        >
-                            {repertoireDownloading ? <><Loader size={11} className="animate-spin"/> Downloading…</> : <><Download size={11}/> Import (yt-dlp)</>}
-                        </button>
-                        {repertoireDownloading && repertoireProgressLog.length > 0 && (
-                            <div className="mt-1 max-h-24 overflow-y-auto rounded border theme-border bg-black/40 p-1 text-[10px] font-mono leading-tight whitespace-pre-wrap">
-                                {repertoireProgressLog.slice(-6).map((l, i) => (
-                                    <div key={i} className="text-green-300 truncate">{l}</div>
-                                ))}
-                            </div>
-                        )}
-                    </div>
-                    <div className="flex-1 overflow-y-auto">
-                        {repertoireItems.length === 0 ? (
-                            <div className="text-xs theme-text-muted p-4 text-center">
-                                No pieces yet. Add audio or paste a YouTube URL above.
-                            </div>
-                        ) : (
-                            repertoireItems.map(item => (
-                                <button
-                                    key={item.id}
-                                    onClick={() => setRepertoireSelectedId(item.id)}
-                                    className={`w-full text-left px-3 py-2 border-b theme-border ${
-                                        item.id === repertoireSelectedId ? 'bg-purple-600/20 text-purple-200' : 'theme-hover'
-                                    }`}
-                                >
-                                    <div className="text-sm font-medium truncate">{item.title || 'Untitled'}</div>
-                                    {item.composer && <div className="text-[11px] theme-text-muted truncate">{item.composer}</div>}
-                                    {item.album && <div className="text-[10px] theme-text-muted truncate italic">{item.album}</div>}
-                                    {item.source_type && (
-                                        <div className="text-[10px] theme-text-muted mt-0.5 uppercase">{item.source_type}</div>
-                                    )}
-                                </button>
-                            ))
-                        )}
-                    </div>
-                </div>
-
-                {/* Right pane — detail */}
-                <div className="flex-1 flex flex-col overflow-auto">
-                    {!repertoireSelected ? (
-                        <div className="flex-1 flex items-center justify-center theme-text-muted text-sm">
-                            Select a piece, or add one from the left.
-                        </div>
-                    ) : (
-                        <div className="p-6 max-w-4xl mx-auto w-full">
-                            {repertoireError && (
-                                <div className="mb-3 px-3 py-2 rounded bg-red-900/40 text-red-200 text-xs flex items-center justify-between">
-                                    <span>{repertoireError}</span>
-                                    <button onClick={() => setRepertoireError(null)} className="opacity-60 hover:opacity-100"><X size={12}/></button>
-                                </div>
-                            )}
-                            {/* Header */}
-                            <div className="flex items-start justify-between gap-3 mb-4">
-                                <div className="flex-1 space-y-1">
-                                    <input
-                                        type="text"
-                                        value={repertoireSelected.title}
-                                        onChange={(e) => repertoireUpdateField('title', e.target.value)}
-                                        className="text-2xl font-semibold w-full bg-transparent border-none outline-none theme-text-primary"
-                                        placeholder="Title"
-                                    />
-                                    <div className="grid grid-cols-2 gap-2">
-                                        <label className="block">
-                                            <span className="text-[10px] uppercase theme-text-muted">Artist / Composer</span>
-                                            <input
-                                                type="text"
-                                                value={repertoireSelected.composer || ''}
-                                                onChange={(e) => repertoireUpdateField('composer', e.target.value)}
-                                                className="theme-input text-sm w-full"
-                                                placeholder="Artist or composer"
-                                            />
-                                        </label>
-                                        <label className="block">
-                                            <span className="text-[10px] uppercase theme-text-muted">Album</span>
-                                            <input
-                                                type="text"
-                                                value={repertoireSelected.album || ''}
-                                                onChange={(e) => repertoireUpdateField('album', e.target.value)}
-                                                className="theme-input text-sm w-full"
-                                                placeholder="Album"
-                                            />
-                                        </label>
-                                    </div>
-                                </div>
-                                <button
-                                    onClick={repertoireDeleteCurrent}
-                                    className="p-2 theme-hover rounded text-red-400 mt-1"
-                                    title="Delete piece"
-                                >
-                                    <Trash2 size={16}/>
-                                </button>
-                            </div>
-
-                            {/* Audio player */}
-                            {repertoireSelected.audio_path ? (
-                                <div className="mb-4 p-3 theme-bg-tertiary rounded border theme-border">
-                                    <audio
-                                        ref={repertoireAudioRef}
-                                        src={`file://${repertoireSelected.audio_path}`}
-                                        controls
-                                        controlsList="noplaybackrate nodownload"
-                                        className="w-full"
-                                        onLoadedMetadata={(e) => {
-                                            const a = e.currentTarget;
-                                            a.playbackRate = repertoirePlaybackRate;
-                                            try {
-                                                (a as any).preservesPitch = true;
-                                                (a as any).mozPreservesPitch = true;
-                                                (a as any).webkitPreservesPitch = true;
-                                            } catch {}
-                                        }}
-                                        onRateChange={(e) => {
-                                            // Keep the slider in sync if the user changes rate via the native menu
-                                            const a = e.currentTarget;
-                                            if (Math.abs(a.playbackRate - repertoirePlaybackRate) > 0.001) {
-                                                setRepertoirePlaybackRate(a.playbackRate);
-                                            }
-                                        }}
-                                    />
-                                    <div className="mt-2 flex items-center gap-2">
-                                        <span className="text-xs theme-text-muted shrink-0">Speed</span>
-                                        <select
-                                            value={repertoirePlaybackRate}
-                                            onChange={(e) => {
-                                                const rate = parseFloat(e.target.value);
-                                                setRepertoirePlaybackRate(rate);
-                                                if (repertoireAudioRef.current) repertoireAudioRef.current.playbackRate = rate;
-                                            }}
-                                            className="theme-bg-tertiary theme-border border rounded px-2 py-0.5 text-sm font-mono cursor-pointer"
-                                            title="Change playback speed"
-                                        >
-                                            {[0.25, 0.5, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2].map(r => (
-                                                <option key={r} value={r}>{r.toFixed(2)}×</option>
-                                            ))}
-                                        </select>
-                                    </div>
-                                    {repertoireSelected.source_url && (
-                                        <div className="mt-2 text-[10px] theme-text-muted truncate">
-                                            Source: {repertoireSelected.source_url}
-                                        </div>
-                                    )}
-                                </div>
-                            ) : (
-                                <div className="mb-4 p-3 theme-bg-tertiary rounded border theme-border text-xs theme-text-muted">
-                                    No audio attached.
-                                </div>
-                            )}
-
-                            {/* Sheets */}
-                            <div className="mb-4">
-                                <div className="flex items-center justify-between mb-2">
-                                    <span className="text-xs font-semibold uppercase theme-text-muted">Sheet music</span>
-                                    <div className="flex items-center gap-1">
-                                        <button
-                                            onClick={repertoireAttachSheetFromFile}
-                                            className="text-[11px] px-2 py-0.5 rounded theme-hover border theme-border flex items-center gap-1"
-                                            title="Attach a MusicXML file"
-                                        >
-                                            <Plus size={11}/> Attach
-                                        </button>
-                                        <button
-                                            onClick={repertoireDeriveCurrent}
-                                            className="text-[11px] px-2 py-0.5 rounded theme-hover border theme-border flex items-center gap-1 disabled:opacity-40"
-                                            title="Derive sheet music from audio (basic-pitch)"
-                                            disabled={!repertoireSelected.audio_path || repertoireDeriving}
-                                        >
-                                            {repertoireDeriving
-                                                ? <><Loader size={11} className="animate-spin"/> Deriving…</>
-                                                : <><Sparkles size={11}/> Derive (beta)</>}
-                                        </button>
-                                    </div>
-                                </div>
-                                {repertoireSheets.length === 0 ? (
-                                    <div className="text-xs theme-text-muted p-3 border theme-border rounded">
-                                        No sheets attached. Attach a MusicXML / .mxl file, or derive from the audio.
-                                    </div>
-                                ) : (
-                                    <div className="space-y-1">
-                                        {repertoireSheets.map(s => (
-                                            <div key={s.id} className="flex items-center justify-between gap-2 px-3 py-2 theme-bg-tertiary border theme-border rounded">
-                                                <button
-                                                    onClick={() => repertoireOpenSheetInNotation(s.id)}
-                                                    className="flex-1 text-left text-sm hover:text-purple-300 truncate"
-                                                    title="Open in Notation editor"
-                                                >
-                                                    <FileJson size={12} className="inline mr-1.5"/>{s.name}
-                                                </button>
-                                                <span className="text-[10px] theme-text-muted">{Math.round((s.xml_length || 0) / 1024)} KB</span>
-                                                <button
-                                                    onClick={async () => {
-                                                        if (!confirm(`Delete sheet "${s.name}"?`)) return;
-                                                        const api = window.api;
-                                                        await api.repertoireDeleteSheet(s.id);
-                                                        if (repertoireSelectedId) repertoireLoadDetail(repertoireSelectedId);
-                                                    }}
-                                                    className="theme-hover rounded p-1 text-red-400"
-                                                    title="Delete sheet"
-                                                >
-                                                    <Trash2 size={11}/>
-                                                </button>
-                                            </div>
-                                        ))}
-                                    </div>
-                                )}
-                            </div>
-                        </div>
-                    )}
-                </div>
-            </div>
-        );
-    };
-
-    const renderLibrary = () => {
-        const filteredFiles = audioFiles.filter(f =>
-            !searchQuery || f.name.toLowerCase().includes(searchQuery.toLowerCase())
-        );
-
-        return (
-            <div className="flex-1 p-4 overflow-y-auto">
-                <div className="grid grid-cols-4 gap-4">
-                    {filteredFiles.map(file => (
-                        <div
-                            key={file.id}
-                            onClick={() => setSelectedAudio(file)}
-                            onDoubleClick={() => {
-                                setSelectedAudio(file);
-                                if (audioRef.current) {
-                                    audioRef.current.src = `file://${file.path}`;
-                                    audioRef.current.play();
-                                    setIsPlaying(true);
-                                }
-                            }}
-                            className={`p-4 rounded-xl cursor-pointer transition-all ${
-                                selectedAudio?.id === file.id
-                                    ? 'bg-purple-600/30 ring-2 ring-purple-500'
-                                    : 'theme-bg-secondary theme-hover'
-                            }`}
-                        >
-                            <div className="aspect-square bg-gradient-to-br from-purple-600/20 to-pink-600/20 rounded-lg flex items-center justify-center mb-3">
-                                <Music size={32} className="text-purple-400"/>
-                            </div>
-                            <p className="text-sm font-medium truncate">{file.name}</p>
-                            {file.duration && (
-                                <p className="text-xs theme-text-muted mt-1">{formatTime(file.duration)}</p>
-                            )}
-                        </div>
-                    ))}
-                </div>
-                {filteredFiles.length === 0 && (
-                    <div className="flex items-center justify-center h-full">
-                        <div className="text-center">
-                            <Music size={64} className="mx-auto theme-text-muted mb-4"/>
-                            <p className="theme-text-muted text-lg">No Audio Files</p>
-                            <p className="theme-text-muted text-sm mt-2">Select a source folder in the sidebar</p>
-                        </div>
-                    </div>
-                )}
-            </div>
-        );
-    };
-
-    const renderGenerator = () => {
-        return (
-            <div className="flex-1 flex overflow-hidden">
-                <div className="w-96 border-r theme-border p-4 flex flex-col gap-4 overflow-y-auto theme-bg-secondary">
-                    <h3 className="text-lg font-semibold flex items-center gap-2">
-                        <Sparkles size={20} className="text-purple-400"/> Audio Generator
-                    </h3>
-
-                    <div>
-                        <label className="text-xs theme-text-muted font-semibold uppercase">Prompt</label>
-                        <textarea
-                            value={genPrompt}
-                            onChange={(e) => setGenPrompt(e.target.value)}
-                            placeholder="Describe the audio you want to create..."
-                            className="w-full theme-input mt-2 text-sm"
-                            rows={4}
-                        />
-                    </div>
-
-                    <div>
-                        <label className="text-xs theme-text-muted font-semibold uppercase">Model</label>
-                        <select
-                            value={genModel}
-                            onChange={(e) => setGenModel(e.target.value)}
-                            className="w-full theme-input mt-2 text-sm"
-                        >
-                            <option value="">Select a model...</option>
-                            <optgroup label="Music Generation">
-                                {AUDIO_MODELS.filter(m => m.type === 'music').map(m => (
-                                    <option key={m.id} value={m.id}>{m.name}</option>
-                                ))}
-                            </optgroup>
-                            <optgroup label="Sound Effects">
-                                {AUDIO_MODELS.filter(m => m.type === 'sfx').map(m => (
-                                    <option key={m.id} value={m.id}>{m.name}</option>
-                                ))}
-                            </optgroup>
-                            <optgroup label="Speech/Voice">
-                                {AUDIO_MODELS.filter(m => m.type === 'speech').map(m => (
-                                    <option key={m.id} value={m.id}>{m.name}</option>
-                                ))}
-                            </optgroup>
-                        </select>
-                    </div>
-
-                    <div>
-                        <label className="text-xs theme-text-muted font-semibold uppercase">Duration (seconds)</label>
-                        <div className="flex items-center gap-3 mt-2">
-                            <input
-                                type="range"
-                                min={5}
-                                max={180}
-                                value={genDuration}
-                                onChange={(e) => setGenDuration(parseInt(e.target.value))}
-                                className="flex-1"
-                            />
-                            <span className="text-sm w-12">{genDuration}s</span>
-                        </div>
-                    </div>
-
-                    <button
-                        onClick={async () => {
-                            if (!genPrompt || !genModel) return;
-                            setGenerating(true);
-                            try {
-                                const modelDef = AUDIO_MODELS.find(m => m.id === genModel) as any;
-                                if (!modelDef) throw new Error(`Unknown model: ${genModel}`);
-
-                                let resp: any;
-                                let audioB64 = '';
-                                let fmt = 'wav';
-                                let savedPath = '';
-
-                                if (modelDef.type === 'speech') {
-                                    const engine = modelDef.provider === 'elevenlabs' ? 'elevenlabs' : 'kokoro';
-                                    const r = await fetch('http://127.0.0.1:5437/api/audio/tts', {
-                                        method: 'POST',
-                                        headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({ text: genPrompt, engine }),
-                                    });
-                                    resp = await r.json();
-                                    if (!resp.success) throw new Error(resp.error || 'TTS failed');
-                                    audioB64 = resp.audio;
-                                    fmt = resp.format || 'wav';
-                                } else {
-                                    // music / sfx — real backend music generator
-                                    const api = window.api;
-                                    if (!api?.generateMusic) throw new Error('generateMusic IPC not available (restart app)');
-                                    resp = await api.generateMusic(
-                                        genPrompt,
-                                        modelDef.provider,
-                                        modelDef.backendModel,
-                                        genDuration,
-                                        currentPath || undefined,
-                                        { workspacePath: currentPath || undefined },
-                                    );
-                                    if (!resp?.success) throw new Error(resp?.error || 'music gen failed');
-                                    audioB64 = resp.audio;
-                                    fmt = resp.format || 'wav';
-                                    savedPath = resp.filename || '';
-                                }
-
-                                const bin = atob(audioB64);
-                                const bytes = new Uint8Array(bin.length);
-                                for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-                                const mime = fmt === 'mp3' ? 'audio/mpeg' : 'audio/wav';
-                                const blob = new Blob([bytes], { type: mime });
-                                const url = URL.createObjectURL(blob);
-
-                                setGeneratedAudio(prev => [...prev, {
-                                    id: `gen_${Date.now()}`,
-                                    name: genPrompt.slice(0, 40),
-                                    path: savedPath || url,
-                                    duration: genDuration,
-                                }]);
-                            } catch (e: any) {
-                                alert('Audio generation failed: ' + (e.message || e));
-                            } finally {
-                                setGenerating(false);
-                            }
-                        }}
-                        disabled={generating || !genPrompt || !genModel}
-                        className="w-full py-3 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg font-semibold flex items-center justify-center gap-2"
-                    >
-                        {generating ? (
-                            <>
-                                <Loader size={18} className="animate-spin"/>
-                                Generating...
-                            </>
-                        ) : (
-                            <>
-                                <Sparkles size={18}/>
-                                Generate Audio
-                            </>
-                        )}
-                    </button>
-                </div>
-
-                <div className="flex-1 flex flex-col overflow-hidden">
-                    {generatedAudio.length > 0 && (
-                        <div className="p-3 border-b theme-border flex items-center gap-2">
-                            <button
-                                onClick={() => {
-                                    setSelectionMode(!selectionMode);
-                                    if (selectionMode) setSelectedGeneratedAudio(new Set());
-                                }}
-                                className={`px-3 py-1.5 rounded text-xs flex items-center gap-1 ${
-                                    selectionMode ? 'bg-purple-600 text-white' : 'theme-bg-tertiary theme-hover'
-                                }`}
-                            >
-                                <Layers size={12} /> Select
-                            </button>
-                            {selectionMode && selectedGeneratedAudio.size > 0 && (
-                                <>
-                                    <span className="text-xs theme-text-muted">{selectedGeneratedAudio.size} selected</span>
-                                    <button
-                                        onClick={() => setShowAddToDataset(true)}
-                                        className="px-3 py-1.5 bg-purple-600 hover:bg-purple-500 text-white rounded text-xs flex items-center gap-1"
-                                    >
-                                        <Plus size={12} /> Add to Dataset
-                                    </button>
-                                </>
-                            )}
-                        </div>
-                    )}
-                    <div className="flex-1 p-4 overflow-y-auto">
-                    {generatedAudio.length > 0 ? (
-                        <div className="grid grid-cols-2 gap-4">
-                            {generatedAudio.map(audio => (
-                                <div
-                                    key={audio.id}
-                                    onClick={() => selectionMode && toggleGeneratedSelection(audio.id)}
-                                    className={`theme-bg-secondary rounded-xl p-4 ${
-                                        selectionMode
-                                            ? selectedGeneratedAudio.has(audio.id)
-                                                ? 'ring-2 ring-purple-500 bg-purple-900/20 cursor-pointer'
-                                                : 'theme-hover cursor-pointer'
-                                            : ''
-                                    }`}
-                                >
-                                    <div className="relative aspect-video bg-gradient-to-br from-purple-900/50 to-pink-900/50 rounded-lg flex items-center justify-center mb-3">
-                                        {selectionMode && (
-                                            <input
-                                                type="checkbox"
-                                                checked={selectedGeneratedAudio.has(audio.id)}
-                                                onChange={() => toggleGeneratedSelection(audio.id)}
-                                                onClick={(e) => e.stopPropagation()}
-                                                className="absolute top-2 left-2 w-4 h-4"
-                                            />
-                                        )}
-                                        <Music size={32} className="text-purple-400"/>
-                                    </div>
-                                    <p className="text-sm truncate">{audio.name}</p>
-                                    <p className="text-xs theme-text-muted">{formatTime(audio.duration || 0)}</p>
-                                    <div className="flex gap-2 mt-3">
-                                        <button
-                                            onClick={() => {
-                                                if (audio.path) {
-                                                    const a = new Audio(`file://${audio.path}`);
-                                                    a.play().catch(e => console.error('Playback error:', e));
-                                                }
-                                            }}
-                                            disabled={!audio.path}
-                                            className="flex-1 py-1.5 bg-purple-600/20 hover:bg-purple-600/30 rounded text-purple-400 text-xs disabled:opacity-40"
-                                        >
-                                            <Play size={12} className="inline mr-1"/> Play
-                                        </button>
-                                        <button
-                                            onClick={() => {
-                                                if (audio.path) {
-                                                    // Add to editor timeline
-                                                    const file: AudioFile = { id: audio.id, name: audio.name, path: audio.path, duration: audio.duration };
-                                                    setAudioFiles(prev => [...prev, file]);
-                                                }
-                                            }}
-                                            disabled={!audio.path}
-                                            className="flex-1 py-1.5 bg-blue-600/20 hover:bg-blue-600/30 rounded text-blue-400 text-xs disabled:opacity-40"
-                                        >
-                                            <Download size={12} className="inline mr-1"/> Add to Editor
-                                        </button>
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
-                    ) : (
-                        <div className="flex items-center justify-center h-full">
-                            <div className="text-center">
-                                <Sparkles size={64} className="mx-auto theme-text-muted mb-4"/>
-                                <p className="theme-text-muted text-lg">Generate AI Audio</p>
-                                <p className="theme-text-muted text-sm mt-2">Enter a prompt and select a model</p>
-                            </div>
-                        </div>
-                    )}
-                    </div>
-
-                    {showAddToDataset && (
-                        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[200]" onClick={() => setShowAddToDataset(false)}>
-                            <div className="theme-bg-secondary rounded-lg shadow-xl w-96 p-6" onClick={e => e.stopPropagation()}>
-                                <h4 className="text-lg font-semibold mb-4 flex items-center gap-2">
-                                    <Plus className="text-purple-400" size={18} />
-                                    Add to Dataset
-                                </h4>
-                                {audioDatasets.length === 0 ? (
-                                    <div className="text-center py-4 theme-text-muted">
-                                        <p>No datasets yet</p>
-                                        <button
-                                            onClick={() => { setShowAddToDataset(false); setActiveMode('datasets'); setShowCreateDataset(true); }}
-                                            className="mt-2 text-purple-400 hover:text-purple-300"
-                                        >
-                                            Create a dataset first
-                                        </button>
-                                    </div>
-                                ) : (
-                                    <div className="space-y-2 max-h-64 overflow-y-auto">
-                                        {audioDatasets.map(dataset => (
-                                            <button
-                                                key={dataset.id}
-                                                onClick={() => addGeneratedToDataset(dataset.id)}
-                                                className="w-full p-3 theme-bg-tertiary theme-hover rounded text-left flex items-center justify-between"
-                                            >
-                                                <div>
-                                                    <span className="font-medium">{dataset.name}</span>
-                                                    <span className="text-xs theme-text-muted ml-2">{dataset.examples.length} samples</span>
-                                                </div>
-                                                <ChevronRight size={16} className="theme-text-muted"/>
-                                            </button>
-                                        ))}
-                                    </div>
-                                )}
-                                <div className="flex justify-end mt-4">
-                                    <button
-                                        onClick={() => setShowAddToDataset(false)}
-                                        className="px-4 py-2 theme-bg-tertiary theme-hover theme-text-primary rounded"
-                                    >
-                                        Cancel
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    )}
-                </div>
-            </div>
-        );
-    };
-
-    const loadWaveform = useCallback(async (audioPath: string, audioId: string) => {
-        if (waveformCache.has(audioId)) return waveformCache.get(audioId);
-
-        try {
-            const buffer = await window.api?.readFileBuffer?.(audioPath);
-            if (!buffer) return null;
-
-            const audioContext = new AudioContext();
-            const audioBuffer = await audioContext.decodeAudioData(buffer.buffer || buffer);
-            const channelData = audioBuffer.getChannelData(0);
-
-            const duration = audioBuffer.duration;
-            const hiResSamples = Math.min(Math.ceil(duration * 1000), 50000);
-            const blockSize = Math.floor(channelData.length / hiResSamples);
-            const hiResWaveform = new Float32Array(hiResSamples * 2);
-
-            for (let i = 0; i < hiResSamples; i++) {
-                let min = 1, max = -1;
-                const start = i * blockSize;
-                const end = Math.min(start + blockSize, channelData.length);
-                for (let j = start; j < end; j++) {
-                    const val = channelData[j];
-                    if (val < min) min = val;
-                    if (val > max) max = val;
-                }
-                hiResWaveform[i * 2] = min;
-                hiResWaveform[i * 2 + 1] = max;
-            }
-
-            setWaveformDataCache(prev => new Map(prev).set(audioId, hiResWaveform));
-
-            const samples = 200;
-            const thumbBlockSize = Math.floor(channelData.length / samples);
-            const waveform: number[] = [];
-
-            for (let i = 0; i < samples; i++) {
-                let sum = 0;
-                for (let j = 0; j < thumbBlockSize; j++) {
-                    sum += Math.abs(channelData[i * thumbBlockSize + j]);
-                }
-                waveform.push(sum / thumbBlockSize);
-            }
-
-            const maxVal = Math.max(...waveform);
-            const normalized = waveform.map(v => v / (maxVal || 1));
-
-            setWaveformCache(prev => new Map(prev).set(audioId, normalized));
-            audioContext.close();
-            return normalized;
-        } catch (err) {
-            console.error('Error loading waveform:', err);
-            return null;
-        }
-    }, []);
-
     const renderWaveformPath = useCallback((
         audioId: string,
         clipWidth: number,
@@ -1832,8 +1365,8 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
         const centerY = clipHeight / 2;
         const amplitude = (clipHeight / 2 - 2) * waveformZoom;
 
-        let pathTop = `M 0 ${centerY}`;
-        let pathBottom = `M 0 ${centerY}`;
+        const topPoints: [number, number][] = [];
+        const bottomPoints: [number, number][] = [];
 
         for (let i = 0; i < pointsToRender; i++) {
             const sampleIndex = Math.floor(startSample + i * samplesPerPoint);
@@ -1842,12 +1375,21 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
             if (sampleIndex * 2 + 1 < hiResData.length) {
                 const min = hiResData[sampleIndex * 2];
                 const max = hiResData[sampleIndex * 2 + 1];
-                pathTop += ` L ${x} ${centerY - max * amplitude}`;
-                pathBottom += ` L ${x} ${centerY - min * amplitude}`;
+                topPoints.push([x, centerY - max * amplitude]);
+                bottomPoints.push([x, centerY - min * amplitude]);
             }
         }
 
-        return pathTop + pathBottom.split(' ').reverse().join(' ').replace('M', 'L') + ' Z';
+        if (topPoints.length === 0) return '';
+
+        const d = [
+            `M 0 ${centerY}`,
+            ...topPoints.map(([x, y]) => `L ${x} ${y}`),
+            ...bottomPoints.reverse().map(([x, y]) => `L ${x} ${y}`),
+            'Z'
+        ].join(' ');
+
+        return d;
     }, [waveformDataCache, waveformZoom]);
 
     const playEditorTimeline = useCallback(async () => {
@@ -1875,10 +1417,9 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
                 if (!audioFile) continue;
 
                 try {
-                    const buffer = await window.api?.readFileBuffer?.(audioFile.path);
-                    if (!buffer) continue;
-
-                    const audioBuffer = await ctx.decodeAudioData(buffer.buffer || buffer);
+                    const ab = await readAudioBuffer(audioFile.path);
+                    if (!ab) continue;
+                    const audioBuffer = await ctx.decodeAudioData(ab);
                     const source = ctx.createBufferSource();
                     const gain = ctx.createGain();
 
@@ -1944,10 +1485,9 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
                 if (!audioFile) continue;
 
                 try {
-                    const buffer = await window.api?.readFileBuffer?.(audioFile.path);
-                    if (!buffer) continue;
-
-                    const audioBuffer = await renderCtx.decodeAudioData(buffer.buffer || buffer);
+                    const ab = await readAudioBuffer(audioFile.path);
+                    if (!ab) continue;
+                    const audioBuffer = await renderCtx.decodeAudioData(ab);
                     const source = renderCtx.createBufferSource();
                     const gain = renderCtx.createGain();
 
@@ -2490,9 +2030,10 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
         let xmlText: string | null = null;
         try {
             if (isCompressed) {
-                const buffer = await window.api?.readFileBuffer?.(filePath);
-                if (!buffer) return;
-                const zip = await JSZip.loadAsync(buffer);
+                const result = await window.api?.readFileBuffer?.(filePath);
+                if (!result?.data) return;
+                const bin = Uint8Array.from(atob(result.data), c => c.charCodeAt(0));
+                const zip = await JSZip.loadAsync(bin);
                 // Find root file via META-INF/container.xml; fall back to any score-looking .xml
                 let rootPath: string | null = null;
                 const containerFile = zip.file('META-INF/container.xml');
@@ -2707,7 +2248,7 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
         if (ctx.state === 'suspended') ctx.resume();
         // Schedule slightly in the future so all per-note scheduling completes
         // before audio begins; same anchor used for visual playhead → no drift.
-        const startTime = ctx.currentTime + 0.1;
+        const startTime = ctx.currentTime + 0.05;
 
         // Stop any previous oscillators
         notationOscillators.current.forEach(osc => { try { osc.stop(); } catch {} });
@@ -2749,14 +2290,9 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
         const SHEET_PAD_LEFT = 45;
         const SHEET_PAD_TOP = 40;
 
-        // Estimated frame paint delay (ms→sec). rAF callbacks fire just before paint, so any value
-        // we read from ctx.currentTime is slightly older than what the user sees on screen. Bumping
-        // the visual time forward by this amount removes the perceived "playhead behind audio" lag.
-        const paintLookahead = 0.024;
-
         const animatePlayhead = () => {
             // Use AudioContext clock + small lookahead — same clock as the audio scheduler so playhead never drifts.
-            const elapsedSec = (ctx.currentTime - startTime) + paintLookahead;
+            const elapsedSec = ctx.currentTime - startTime;
             const currentBeat = Math.max(0, elapsedSec * (notationBpm / 60));
             if (elapsedSec < totalDurationSec) {
                 // Update piano-roll playhead via ref (no React render)
@@ -2874,15 +2410,15 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
 
     const analyzeAudio = useCallback(async (audioPath: string) => {
         try {
-            const buffer = await window.api?.readFileBuffer?.(audioPath);
-            if (!buffer) return;
+            const ab = await readAudioBuffer(audioPath);
+            if (!ab) return;
 
             // Clean up previous context
             if (audioContextRef.current) {
                 try { audioContextRef.current.close(); } catch {}
             }
             const audioContext = new AudioContext();
-            const audioBuffer = await audioContext.decodeAudioData(buffer.buffer || buffer);
+            const audioBuffer = await audioContext.decodeAudioData(ab);
             setAnalysisAudioBuffer(audioBuffer);
 
             const channelData = audioBuffer.getChannelData(0);
@@ -3151,3690 +2687,6 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
         return `${m}:${s.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`;
     };
 
-    const renderBeatMaker = () => {
-        const rows: Array<{ id: string; name: string; color: string }> = [
-            { id: 'kick',  name: 'Kick',  color: 'bg-red-500' },
-            { id: 'snare', name: 'Snare', color: 'bg-orange-500' },
-            { id: 'hat',   name: 'HiHat', color: 'bg-yellow-500' },
-            { id: 'open',  name: 'Open Hat', color: 'bg-lime-500' },
-            { id: 'clap',  name: 'Clap',  color: 'bg-green-500' },
-            { id: 'tom',   name: 'Tom',   color: 'bg-blue-500' },
-            { id: 'rim',   name: 'Rim',   color: 'bg-purple-500' },
-            { id: 'cow',   name: 'Cowbell', color: 'bg-cyan-500' },
-        ];
-        const STEPS = 16;
-        const stepKey = (rowId: string, step: number) => `${rowId}-${step}`;
-        const toggle = (rowId: string, step: number) => {
-            setBeatPattern(prev => {
-                const next = new Set(prev);
-                const k = stepKey(rowId, step);
-                if (next.has(k)) next.delete(k); else next.add(k);
-                return next;
-            });
-        };
-
-        // Build a shared white-noise buffer once per context for drum voices.
-        const getNoiseBuf = (ctx: AudioContext) => {
-            const r: any = beatAudioCtxRef.current as any;
-            if (r && r._noiseBuf) return r._noiseBuf as AudioBuffer;
-            const buf = ctx.createBuffer(1, ctx.sampleRate * 1.0, ctx.sampleRate);
-            const data = buf.getChannelData(0);
-            for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
-            (beatAudioCtxRef.current as any)._noiseBuf = buf;
-            return buf;
-        };
-
-        const voices = {
-            kick: (ctx: AudioContext, t: number) => {
-                const osc = ctx.createOscillator();
-                const g = ctx.createGain();
-                osc.frequency.setValueAtTime(150, t);
-                osc.frequency.exponentialRampToValueAtTime(40, t + 0.18);
-                g.gain.setValueAtTime(1.0, t);
-                g.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
-                osc.connect(g); g.connect(ctx.destination);
-                osc.start(t); osc.stop(t + 0.4);
-            },
-            snare: (ctx: AudioContext, t: number) => {
-                // noise burst
-                const src = ctx.createBufferSource(); src.buffer = getNoiseBuf(ctx);
-                const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 1000;
-                const ng = ctx.createGain(); ng.gain.setValueAtTime(0.8, t); ng.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
-                src.connect(hp); hp.connect(ng); ng.connect(ctx.destination);
-                src.start(t); src.stop(t + 0.2);
-                // tonal body
-                const osc = ctx.createOscillator(); osc.type = 'triangle'; osc.frequency.value = 180;
-                const tg = ctx.createGain(); tg.gain.setValueAtTime(0.5, t); tg.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
-                osc.connect(tg); tg.connect(ctx.destination);
-                osc.start(t); osc.stop(t + 0.15);
-            },
-            hat: (ctx: AudioContext, t: number) => {
-                const src = ctx.createBufferSource(); src.buffer = getNoiseBuf(ctx);
-                const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 7000;
-                const g = ctx.createGain(); g.gain.setValueAtTime(0.35, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
-                src.connect(hp); hp.connect(g); g.connect(ctx.destination);
-                src.start(t); src.stop(t + 0.06);
-            },
-            open: (ctx: AudioContext, t: number) => {
-                const src = ctx.createBufferSource(); src.buffer = getNoiseBuf(ctx);
-                const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 5000;
-                const g = ctx.createGain(); g.gain.setValueAtTime(0.35, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.25);
-                src.connect(hp); hp.connect(g); g.connect(ctx.destination);
-                src.start(t); src.stop(t + 0.3);
-            },
-            clap: (ctx: AudioContext, t: number) => {
-                const bursts = [0, 0.01, 0.02, 0.05];
-                bursts.forEach((d, i) => {
-                    const src = ctx.createBufferSource(); src.buffer = getNoiseBuf(ctx);
-                    const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 1200; bp.Q.value = 0.5;
-                    const g = ctx.createGain();
-                    const tt = t + d;
-                    g.gain.setValueAtTime(i === bursts.length - 1 ? 0.7 : 0.5, tt);
-                    g.gain.exponentialRampToValueAtTime(0.001, tt + (i === bursts.length - 1 ? 0.12 : 0.03));
-                    src.connect(bp); bp.connect(g); g.connect(ctx.destination);
-                    src.start(tt); src.stop(tt + 0.15);
-                });
-            },
-            tom: (ctx: AudioContext, t: number) => {
-                const osc = ctx.createOscillator(); osc.type = 'sine';
-                osc.frequency.setValueAtTime(220, t);
-                osc.frequency.exponentialRampToValueAtTime(90, t + 0.3);
-                const g = ctx.createGain();
-                g.gain.setValueAtTime(0.8, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
-                osc.connect(g); g.connect(ctx.destination);
-                osc.start(t); osc.stop(t + 0.45);
-            },
-            rim: (ctx: AudioContext, t: number) => {
-                const osc1 = ctx.createOscillator(); osc1.type = 'square'; osc1.frequency.value = 320;
-                const osc2 = ctx.createOscillator(); osc2.type = 'square'; osc2.frequency.value = 800;
-                const g = ctx.createGain(); g.gain.setValueAtTime(0.35, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.04);
-                osc1.connect(g); osc2.connect(g); g.connect(ctx.destination);
-                osc1.start(t); osc1.stop(t + 0.05);
-                osc2.start(t); osc2.stop(t + 0.05);
-            },
-            cow: (ctx: AudioContext, t: number) => {
-                const freqs = [560, 845];
-                freqs.forEach(f => {
-                    const o = ctx.createOscillator(); o.type = 'square'; o.frequency.value = f;
-                    const g = ctx.createGain(); g.gain.setValueAtTime(0.25, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.22);
-                    o.connect(g); g.connect(ctx.destination);
-                    o.start(t); o.stop(t + 0.25);
-                });
-            },
-        } as Record<string, (ctx: AudioContext, t: number) => void>;
-
-        const playStep = (step: number) => {
-            try {
-                const Ctx = (window as any).AudioContext || (window as any).webkitAudioContext;
-                if (!Ctx) return;
-                if (!beatAudioCtxRef.current) beatAudioCtxRef.current = new Ctx();
-                const ctx = beatAudioCtxRef.current;
-                if (ctx.state === 'suspended') ctx.resume();
-                const t = ctx.currentTime + 0.01;
-                rows.forEach(r => {
-                    if (!beatPattern.has(stepKey(r.id, step))) return;
-                    const voice = voices[r.id];
-                    if (voice) voice(ctx, t);
-                });
-            } catch (e) { console.warn('[beat] play failed', e); }
-        };
-        const togglePlay = () => {
-            if (beatPlayRef.current) {
-                clearInterval(beatPlayRef.current);
-                beatPlayRef.current = null;
-                setBeatPlaying(false);
-                setBeatCurrentStep(-1);
-                return;
-            }
-            setBeatPlaying(true);
-            let step = 0;
-            playStep(step);
-            setBeatCurrentStep(step);
-            const intervalMs = (60 / beatBpm / 4) * 1000;
-            beatPlayRef.current = setInterval(() => {
-                step = (step + 1) % STEPS;
-                playStep(step);
-                setBeatCurrentStep(step);
-            }, intervalMs);
-        };
-        const clearPattern = () => setBeatPattern(new Set());
-        return (
-            <div className="flex-1 flex flex-col overflow-hidden p-4 gap-3">
-                <div className="flex items-center gap-3">
-                    <button onClick={togglePlay} className={`px-4 py-2 rounded ${beatPlaying ? 'bg-red-600' : 'bg-green-600'} text-white text-sm font-medium`}>
-                        {beatPlaying ? 'Stop' : 'Play'}
-                    </button>
-                    <button onClick={clearPattern} className="px-3 py-2 rounded bg-gray-700 hover:bg-gray-600 text-sm">Clear</button>
-                    <label className="text-xs theme-text-muted ml-2">BPM</label>
-                    <input type="number" min={40} max={240} value={beatBpm} onChange={e => setBeatBpm(Math.max(40, Math.min(240, parseInt(e.target.value) || 120)))} className="w-16 theme-input text-sm" />
-                    <span className="text-xs theme-text-muted ml-auto">{beatPattern.size} active · 16-step sequencer</span>
-                </div>
-                <div className="flex-1 overflow-auto rounded border theme-border">
-                    <table className="w-full border-collapse">
-                        <tbody>
-                            {rows.map(r => (
-                                <tr key={r.id}>
-                                    <td className="px-2 py-1 text-xs font-medium theme-text-primary border-b theme-border bg-black/30 sticky left-0 min-w-[80px]">{r.name}</td>
-                                    {Array.from({ length: STEPS }).map((_, i) => {
-                                        const active = beatPattern.has(stepKey(r.id, i));
-                                        const isBeat = i % 4 === 0;
-                                        const isCurrent = beatCurrentStep === i;
-                                        return (
-                                            <td key={i} className="p-0.5 border-b theme-border">
-                                                <button
-                                                    onClick={() => toggle(r.id, i)}
-                                                    className={`w-full h-9 rounded ${active ? r.color : isBeat ? 'bg-white/10' : 'bg-white/5'} ${isCurrent ? 'ring-2 ring-white' : ''} hover:brightness-125 transition-all`}
-                                                    title={`${r.name} · step ${i + 1}`}
-                                                />
-                                            </td>
-                                        );
-                                    })}
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        );
-    };
-
-    const renderEditor = () => {
-        const pixelsPerSecond = 50 * editorZoom;
-        const totalDuration = Math.max(60, ...tracks.flatMap(t => t.clips.map(c => c.startTime + c.duration + 10)));
-        const timelineWidth = totalDuration * pixelsPerSecond;
-
-        const markerInterval = editorZoom >= 2 ? 1 : editorZoom >= 1 ? 2 : editorZoom >= 0.5 ? 5 : 10;
-        const markers: number[] = [];
-        for (let t = 0; t <= totalDuration; t += markerInterval) {
-            markers.push(t);
-        }
-
-        const LevelMeter = ({ trackId }: { trackId: string }) => {
-            const levels = trackLevels.get(trackId) || { left: 0, right: 0 };
-            return (
-                <div className="flex gap-0.5 h-12">
-                    {['left', 'right'].map(ch => (
-                        <div key={ch} className="w-1.5 theme-bg-secondary rounded-sm overflow-hidden flex flex-col-reverse">
-                            <div
-                                className={`transition-all duration-75 ${levels[ch as 'left' | 'right'] > 0.9 ? 'bg-red-500' : levels[ch as 'left' | 'right'] > 0.7 ? 'bg-yellow-500' : 'bg-green-500'}`}
-                                style={{ height: `${levels[ch as 'left' | 'right'] * 100}%` }}
-                            />
-                        </div>
-                    ))}
-                </div>
-            );
-        };
-
-        const PanKnob = ({ value, onChange }: { value: number; onChange: (v: number) => void }) => {
-            const rotation = value * 135;
-            return (
-                <div
-                    className="w-6 h-6 rounded-full theme-bg-tertiary border-2 theme-border cursor-pointer relative flex items-center justify-center"
-                    onMouseDown={(e) => {
-                        const startY = e.clientY;
-                        const startVal = value;
-                        const onMove = (me: MouseEvent) => {
-                            const delta = (startY - me.clientY) / 50;
-                            onChange(Math.max(-1, Math.min(1, startVal + delta)));
-                        };
-                        const onUp = () => {
-                            window.removeEventListener('mousemove', onMove);
-                            window.removeEventListener('mouseup', onUp);
-                        };
-                        window.addEventListener('mousemove', onMove);
-                        window.addEventListener('mouseup', onUp);
-                    }}
-                    onDoubleClick={() => onChange(0)}
-                    title={`Pan: ${value === 0 ? 'C' : value < 0 ? `L${Math.abs(Math.round(value * 100))}` : `R${Math.round(value * 100)}`}`}
-                >
-                    <div
-                        className="w-0.5 h-2 bg-purple-400 absolute"
-                        style={{ transform: `rotate(${rotation}deg)`, transformOrigin: 'bottom center', bottom: '50%' }}
-                    />
-                    <div className="w-1 h-1 rounded-full bg-gray-500" />
-                </div>
-            );
-        };
-
-        return (
-            <div className="flex-1 flex flex-col overflow-hidden">
-                <div className="h-10 border-b theme-border flex items-center px-2 gap-1 theme-bg-secondary">
-                    <div className="flex theme-bg-primary rounded p-0.5 mr-2">
-                        <button
-                            onClick={() => setEditorTool('select')}
-                            className={`p-1.5 rounded ${editorTool === 'select' ? 'bg-purple-600' : 'theme-hover'}`}
-                            title="Select Tool (V)"
-                        >
-                            <MousePointer size={14}/>
-                        </button>
-                        <button
-                            onClick={() => setEditorTool('move')}
-                            className={`p-1.5 rounded ${editorTool === 'move' ? 'bg-purple-600' : 'theme-hover'}`}
-                            title="Move Tool (M)"
-                        >
-                            <Move size={14}/>
-                        </button>
-                        <button
-                            onClick={() => setEditorTool('cut')}
-                            className={`p-1.5 rounded ${editorTool === 'cut' ? 'bg-purple-600' : 'theme-hover'}`}
-                            title="Cut Tool (C)"
-                        >
-                            <Scissors size={14}/>
-                        </button>
-                    </div>
-
-                    <button onClick={editorUndo} disabled={undoStack.length === 0}
-                            className={`p-1.5 rounded ${undoStack.length > 0 ? 'theme-hover' : 'opacity-40'}`} title="Undo (Ctrl+Z)">
-                        <Undo size={14}/>
-                    </button>
-                    <button onClick={editorRedo} disabled={redoStack.length === 0}
-                            className={`p-1.5 rounded ${redoStack.length > 0 ? 'theme-hover' : 'opacity-40'}`} title="Redo (Ctrl+Y)">
-                        <Redo size={14}/>
-                    </button>
-                    <div className="w-px h-5 theme-bg-tertiary mx-1"/>
-                    <button onClick={cutClip} disabled={!selectedClipId}
-                            className={`p-1.5 rounded ${selectedClipId ? 'theme-hover' : 'opacity-40'}`} title="Cut (Ctrl+X)">
-                        <Scissors size={14}/>
-                    </button>
-                    <button onClick={copyClip} disabled={!selectedClipId}
-                            className={`p-1.5 rounded ${selectedClipId ? 'theme-hover' : 'opacity-40'}`} title="Copy (Ctrl+C)">
-                        <Copy size={14}/>
-                    </button>
-                    <button onClick={() => tracks.length > 0 && pasteClip(tracks[0].id, editorPlayhead)}
-                            disabled={!clipboard} className={`p-1.5 rounded ${clipboard ? 'theme-hover' : 'opacity-40'}`} title="Paste (Ctrl+V)">
-                        <ClipboardPaste size={14}/>
-                    </button>
-                    <button onClick={deleteClip} disabled={!selectedClipId}
-                            className={`p-1.5 rounded ${selectedClipId ? 'theme-hover text-red-400' : 'opacity-40'}`} title="Delete">
-                        <Trash2 size={14}/>
-                    </button>
-                    <div className="w-px h-5 theme-bg-tertiary mx-1"/>
-                    <button onClick={splitClipAtPlayhead} disabled={!selectedClipId}
-                            className={`p-1.5 rounded ${selectedClipId ? 'theme-hover' : 'opacity-40'}`} title="Split at Playhead (S)">
-                        <Scissors size={14} className="rotate-90"/>
-                    </button>
-
-                    <div className="w-px h-5 theme-bg-tertiary mx-1"/>
-                    <button
-                        onClick={() => setSnapToGrid(!snapToGrid)}
-                        className={`p-1.5 rounded flex items-center gap-1 ${snapToGrid ? 'bg-purple-600' : 'theme-hover'}`}
-                        title="Snap to Grid (G)"
-                    >
-                        <Magnet size={14}/>
-                    </button>
-                    <select
-                        value={gridSize}
-                        onChange={(e) => setGridSize(parseFloat(e.target.value) as any)}
-                        className="px-1.5 py-0.5 theme-bg-secondary border theme-border rounded text-xs"
-                        disabled={!snapToGrid}
-                    >
-                        <option value={0.25}>1/4s</option>
-                        <option value={0.5}>1/2s</option>
-                        <option value={1}>1s</option>
-                        <option value={2}>2s</option>
-                        <option value={4}>4s</option>
-                    </select>
-
-                    <div className="w-px h-5 theme-bg-tertiary mx-1"/>
-                    <button onClick={() => setEditorZoom(Math.max(0.25, editorZoom - 0.25))} className="p-1.5 theme-hover rounded">
-                        <ZoomOut size={14}/>
-                    </button>
-                    <span className="text-xs theme-text-muted w-10 text-center">{Math.round(editorZoom * 100)}%</span>
-                    <button onClick={() => setEditorZoom(Math.min(8, editorZoom + 0.25))} className="p-1.5 theme-hover rounded">
-                        <ZoomIn size={14}/>
-                    </button>
-
-                    <div className="w-px h-5 theme-bg-tertiary mx-1"/>
-                    <button
-                        onClick={() => setShowEffectsPanel(!showEffectsPanel)}
-                        className={`px-2 py-1 rounded text-xs flex items-center gap-1 ${showEffectsPanel ? 'bg-purple-600' : 'theme-bg-tertiary theme-hover'}`}
-                    >
-                        <Sliders size={12}/> FX
-                    </button>
-
-                    <div className="w-px h-5 theme-bg-tertiary mx-1"/>
-                    <button
-                        onClick={async () => {
-                            const api = window.api;
-                            if (!api?.showOpenDialog) { alert('file dialog IPC missing — restart app'); return; }
-                            const result = await api.showOpenDialog({
-                                title: 'Import Audio Files',
-                                properties: ['openFile', 'multiSelections'],
-                                filters: [
-                                    { name: 'Audio', extensions: ['mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac', 'aiff', 'wma', 'webm'] },
-                                    { name: 'All Files', extensions: ['*'] },
-                                ],
-                            });
-                            const picked: string[] = Array.isArray(result)
-                                ? result.map((r: any) => r?.path).filter(Boolean)
-                                : (result?.filePaths || []);
-                            if (picked.length === 0) return;
-
-                            // Create file entries + audioFiles library entries
-                            const newFiles = picked.map((p, i) => ({
-                                id: `imported_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 6)}`,
-                                name: p.split('/').pop() || p,
-                                path: p,
-                                duration: 0,
-                            }));
-                            setAudioFiles(prev => {
-                                const existing = new Set(prev.map(f => f.path));
-                                return [...prev, ...newFiles.filter(f => !existing.has(f.path))];
-                            });
-
-                            // Drop each as a clip — one per track, creating new tracks as needed.
-                            // Probe duration asynchronously per file.
-                            const probeDuration = (src: string) => new Promise<number>(resolve => {
-                                const a = new Audio();
-                                a.preload = 'metadata';
-                                a.onloadedmetadata = () => resolve(a.duration || 5);
-                                a.onerror = () => resolve(5);
-                                a.src = `file://${src}`;
-                            });
-
-                            saveUndoState();
-                            for (let i = 0; i < newFiles.length; i++) {
-                                const f = newFiles[i];
-                                const dur = await probeDuration(f.path);
-                                setAudioFiles(prev => prev.map(af => af.id === f.id ? { ...af, duration: dur } : af));
-                                const clip = {
-                                    id: `clip_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 6)}`,
-                                    audioId: f.id,
-                                    startTime: editorPlayhead,
-                                    duration: dur,
-                                    offset: 0,
-                                    name: f.name,
-                                    gain: 1,
-                                    fadeIn: 0,
-                                    fadeOut: 0,
-                                };
-                                setTracks(prev => {
-                                    // pick the i-th track; if it doesn't exist, create it.
-                                    if (prev[i]) {
-                                        return prev.map((t, idx) => idx === i ? { ...t, clips: [...t.clips, clip] } : t);
-                                    }
-                                    return [...prev, {
-                                        id: `track-${prev.length + 1}`,
-                                        name: `Track ${prev.length + 1}`,
-                                        clips: [clip],
-                                        volume: 1, pan: 0, muted: false, solo: false,
-                                        color: prev.length % TRACK_COLORS.length, height: 80,
-                                    }];
-                                });
-                                loadWaveform(f.path, f.id);
-                            }
-                        }}
-                        className="px-2 py-1 rounded text-xs flex items-center gap-1 bg-green-600 hover:bg-green-500 text-white"
-                        title="Import audio files from disk as new clips"
-                    >
-                        <Upload size={12}/> Import Audio
-                    </button>
-
-                    <div className="flex-1"/>
-
-                    <button
-                        onClick={async () => {
-                            if (isRecording) {
-                                mediaRecorderRef.current?.stop();
-                                setIsRecording(false);
-                            } else {
-                                try {
-                                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                                    const recorder = new MediaRecorder(stream);
-                                    mediaRecorderRef.current = recorder;
-                                    const chunks: Blob[] = [];
-                                    recorder.ondataavailable = (e) => chunks.push(e.data);
-                                    recorder.onstop = async () => {
-                                        const blob = new Blob(chunks, { type: 'audio/webm' });
-                                        const arrayBuffer = await blob.arrayBuffer();
-                                        const fileName = `recording_${Date.now()}.webm`;
-                                        const savePath = audioSource ? `${audioSource}/${fileName}` : fileName;
-                                        try {
-                                            await window.api?.writeFileBuffer?.(savePath, new Uint8Array(arrayBuffer));
-                                            loadAudioFiles(audioSource);
-                                        } catch (e) { console.error('Failed to save:', e); }
-                                    };
-                                    recorder.start();
-                                    setIsRecording(true);
-                                } catch (err) { console.error('Recording error:', err); }
-                            }
-                        }}
-                        className={`px-2 py-1 rounded flex items-center gap-1 text-xs ${isRecording ? 'bg-red-600 animate-pulse' : 'bg-red-600/20 hover:bg-red-600/30 text-red-400'}`}
-                    >
-                        <Circle size={10} fill={isRecording ? 'currentColor' : 'none'}/>
-                        {isRecording ? 'Recording...' : 'REC'}
-                    </button>
-
-                    <div className="w-px h-5 theme-bg-tertiary mx-1"/>
-
-                    <div className="flex items-center gap-1 theme-bg-primary rounded px-2 py-0.5">
-                        <span className="text-[10px] theme-text-muted">BPM</span>
-                        <input
-                            type="number"
-                            value={projectBpm}
-                            onChange={(e) => setProjectBpm(Math.max(20, Math.min(300, parseInt(e.target.value) || 120)))}
-                            className="w-12 bg-transparent text-xs font-mono text-center"
-                        />
-                        <button
-                            onClick={() => setShowBpmGrid(!showBpmGrid)}
-                            className={`p-0.5 rounded ${showBpmGrid ? 'bg-purple-600' : 'theme-hover'}`}
-                            title="Show beat grid"
-                        >
-                            <Grid size={10}/>
-                        </button>
-                    </div>
-
-                    <button
-                        onClick={() => addMarker()}
-                        className="px-2 py-1 bg-yellow-600/20 hover:bg-yellow-600/30 text-yellow-400 rounded text-xs flex items-center gap-1"
-                        title="Add Marker (M)"
-                    >
-                        <Tag size={10}/> Marker
-                    </button>
-
-                    <div className="flex items-center gap-1">
-                        <span className="text-[10px] theme-text-muted">Wave</span>
-                        <button onClick={() => setWaveformZoom(Math.max(0.5, waveformZoom - 0.25))} className="p-0.5 theme-hover rounded">
-                            <ZoomOut size={10}/>
-                        </button>
-                        <span className="text-[10px] w-6 text-center">{Math.round(waveformZoom * 100)}%</span>
-                        <button onClick={() => setWaveformZoom(Math.min(3, waveformZoom + 0.25))} className="p-0.5 theme-hover rounded">
-                            <ZoomIn size={10}/>
-                        </button>
-                    </div>
-                </div>
-
-                {showEffectsPanel && (
-                    <div className="h-24 border-b theme-border theme-bg-secondary p-2 flex gap-3 overflow-x-auto">
-                        <div className="flex flex-col gap-0.5 min-w-[100px]">
-                            <span className="text-[10px] theme-text-muted uppercase">Master</span>
-                            <input type="range" min={0} max={2} step={0.01} value={masterVolume}
-                                   onChange={(e) => setMasterVolume(parseFloat(e.target.value))} className="w-full h-1.5 accent-purple-500"/>
-                            <span className="text-[10px] theme-text-muted text-center">{Math.round(masterVolume * 100)}%</span>
-                        </div>
-                        {['Reverb', 'Delay', 'Chorus'].map(fx => (
-                            <div key={fx} className="flex flex-col gap-0.5 min-w-[80px]">
-                                <span className="text-[10px] theme-text-muted uppercase">{fx}</span>
-                                <input type="range" min={0} max={1} step={0.01} defaultValue={0} className="w-full h-1.5 accent-purple-500"/>
-                                <span className="text-[10px] theme-text-muted text-center">0%</span>
-                            </div>
-                        ))}
-                        <div className="w-px theme-bg-tertiary"/>
-                        {['Low', 'Mid', 'High'].map(band => (
-                            <div key={band} className="flex flex-col gap-0.5 min-w-[60px]">
-                                <span className="text-[10px] theme-text-muted uppercase">{band} EQ</span>
-                                <input type="range" min={-12} max={12} step={0.5} defaultValue={0} className="w-full h-1.5 accent-blue-500"/>
-                                <span className="text-[10px] theme-text-muted text-center">0dB</span>
-                            </div>
-                        ))}
-                    </div>
-                )}
-
-                <div className="flex-1 flex overflow-hidden" ref={editorContainerRef}>
-                    <div className="w-52 border-r theme-border flex flex-col theme-bg-secondary flex-shrink-0">
-                        <div className="h-6 border-b theme-border flex items-center px-2 theme-bg-primary">
-                            <span className="text-[10px] theme-text-muted uppercase">Tracks</span>
-                        </div>
-
-                        <div className="flex-1 overflow-y-auto">
-                            {tracks.map((track, trackIdx) => {
-                                const isLocked = lockedTracks.has(track.id);
-                                const isArmed = armedTracks.has(track.id);
-                                return (
-                                    <div
-                                        key={track.id}
-                                        className={`h-20 border-b theme-border p-1.5 flex flex-col ${
-                                            track.muted ? 'opacity-60' : ''
-                                        } ${isLocked ? 'theme-bg-secondary' : ''}`}
-                                    >
-                                        <div className="flex items-center gap-1 mb-1">
-                                            <span className="text-[10px] theme-text-muted w-4">{trackIdx + 1}</span>
-                                            <input
-                                                type="text"
-                                                value={track.name}
-                                                onChange={(e) => setTracks(prev => prev.map(t =>
-                                                    t.id === track.id ? {...t, name: e.target.value} : t
-                                                ))}
-                                                disabled={isLocked}
-                                                className="flex-1 bg-transparent text-xs font-medium theme-text-primary border-b border-transparent hover:border-current focus:border-purple-500 outline-none"
-                                            />
-                                            <button
-                                                onClick={() => setLockedTracks(prev => {
-                                                    const next = new Set(prev);
-                                                    if (next.has(track.id)) next.delete(track.id);
-                                                    else next.add(track.id);
-                                                    return next;
-                                                })}
-                                                className={`p-0.5 rounded ${isLocked ? 'text-yellow-500' : 'theme-text-muted'}`}
-                                            >
-                                                {isLocked ? <Lock size={10}/> : <Unlock size={10}/>}
-                                            </button>
-                                        </div>
-
-                                        <div className="flex items-center gap-1">
-                                            <button
-                                                onClick={() => setArmedTracks(prev => {
-                                                    const next = new Set(prev);
-                                                    if (next.has(track.id)) next.delete(track.id);
-                                                    else next.add(track.id);
-                                                    return next;
-                                                })}
-                                                className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${
-                                                    isArmed ? 'bg-red-600 text-white' : 'theme-bg-tertiary theme-text-muted theme-hover'
-                                                }`}
-                                                title="Arm for recording"
-                                            >
-                                                R
-                                            </button>
-                                            <button
-                                                onClick={() => !isLocked && setTracks(prev => prev.map(t =>
-                                                    t.id === track.id ? {...t, muted: !t.muted} : t
-                                                ))}
-                                                disabled={isLocked}
-                                                className={`w-5 h-5 rounded flex items-center justify-center text-[10px] font-bold ${
-                                                    track.muted ? 'bg-red-600 text-white' : 'theme-bg-tertiary theme-text-muted theme-hover'
-                                                }`}
-                                                title="Mute"
-                                            >
-                                                M
-                                            </button>
-                                            <button
-                                                onClick={() => !isLocked && setTracks(prev => prev.map(t =>
-                                                    t.id === track.id ? {...t, solo: !t.solo} : t
-                                                ))}
-                                                disabled={isLocked}
-                                                className={`w-5 h-5 rounded flex items-center justify-center text-[10px] font-bold ${
-                                                    track.solo ? 'bg-yellow-500 text-black' : 'theme-bg-tertiary theme-text-muted theme-hover'
-                                                }`}
-                                                title="Solo"
-                                            >
-                                                S
-                                            </button>
-                                            <PanKnob
-                                                value={track.pan}
-                                                onChange={(v) => !isLocked && setTracks(prev => prev.map(t =>
-                                                    t.id === track.id ? {...t, pan: v} : t
-                                                ))}
-                                            />
-                                            <LevelMeter trackId={track.id}/>
-                                        </div>
-
-                                        <div className="flex items-center gap-1 mt-auto">
-                                            <Volume2 size={10} className="theme-text-muted"/>
-                                            <input
-                                                type="range"
-                                                min={0}
-                                                max={1.5}
-                                                step={0.01}
-                                                value={track.volume}
-                                                onChange={(e) => !isLocked && setTracks(prev => prev.map(t =>
-                                                    t.id === track.id ? {...t, volume: parseFloat(e.target.value)} : t
-                                                ))}
-                                                disabled={isLocked}
-                                                className="flex-1 h-1 accent-purple-500"
-                                            />
-                                            <span className="text-[9px] theme-text-muted w-7 text-right">
-                                                {track.volume <= 1 ? Math.round(track.volume * 100) : `+${Math.round((track.volume - 1) * 100)}`}%
-                                            </span>
-                                        </div>
-                                    </div>
-                                );
-                            })}
-                            <button
-                                onClick={() => setTracks(prev => [...prev, {
-                                    id: `track-${Date.now()}`,
-                                    name: `Track ${prev.length + 1}`,
-                                    clips: [],
-                                    volume: 1,
-                                    pan: 0,
-                                    muted: false,
-                                    solo: false,
-                                    color: prev.length % TRACK_COLORS.length,
-                                    height: 80
-                                }])}
-                                className="h-8 flex items-center justify-center text-xs theme-text-muted theme-hover gap-1"
-                            >
-                                <Plus size={12}/> Add Track
-                            </button>
-                        </div>
-                    </div>
-
-                    <div className="flex-1 flex flex-col overflow-hidden">
-                        <div
-                            className="h-6 border-b theme-border theme-bg-primary overflow-x-auto overflow-y-hidden flex-shrink-0"
-                            style={{ scrollbarWidth: 'none' }}
-                            onScroll={(e) => {
-
-                                const tracksContainer = e.currentTarget.nextElementSibling;
-                                if (tracksContainer) tracksContainer.scrollLeft = e.currentTarget.scrollLeft;
-                            }}
-                        >
-                            <div className="h-full relative" style={{ width: `${timelineWidth}px` }}>
-                                {markers.map(t => (
-                                    <div
-                                        key={t}
-                                        className="absolute top-0 h-full flex flex-col items-center"
-                                        style={{ left: `${t * pixelsPerSecond}px` }}
-                                    >
-                                        <span className="text-[9px] theme-text-muted font-mono">{formatTime(t)}</span>
-                                        <div className="flex-1 w-px theme-bg-tertiary"/>
-                                    </div>
-                                ))}
-                                {snapToGrid && gridSize < markerInterval && markers.flatMap(t => {
-                                    const subMarkers = [];
-                                    for (let st = t + gridSize; st < t + markerInterval && st <= totalDuration; st += gridSize) {
-                                        subMarkers.push(
-                                            <div
-                                                key={`sub-${st}`}
-                                                className="absolute bottom-0 w-px h-2 theme-bg-secondary"
-                                                style={{ left: `${st * pixelsPerSecond}px` }}
-                                            />
-                                        );
-                                    }
-                                    return subMarkers;
-                                })}
-                                <div
-                                    className="absolute top-0 h-full flex flex-col items-center pointer-events-none z-20"
-                                    style={{ left: `${editorPlayhead * pixelsPerSecond}px` }}
-                                >
-                                    <div className="w-0 h-0 border-l-4 border-r-4 border-t-4 border-l-transparent border-r-transparent border-t-red-500"/>
-                                </div>
-                                {loopEnabled && (
-                                    <div
-                                        className="absolute top-0 h-full bg-blue-500/20 border-l-2 border-r-2 border-blue-500"
-                                        style={{
-                                            left: `${loopStart * pixelsPerSecond}px`,
-                                            width: `${(loopEnd - loopStart) * pixelsPerSecond}px`
-                                        }}
-                                    />
-                                )}
-                            </div>
-                        </div>
-
-                        <div
-                            className="flex-1 overflow-auto theme-bg-primary"
-                            onScroll={(e) => {
-
-                                const ruler = e.currentTarget.previousElementSibling;
-                                if (ruler) ruler.scrollLeft = e.currentTarget.scrollLeft;
-                            }}
-                        >
-                            <div style={{ width: `${timelineWidth}px`, minHeight: '100%' }}>
-                                {tracks.map((track, trackIdx) => {
-                                    const isLocked = lockedTracks.has(track.id);
-                                    return (
-                                        <div
-                                            key={track.id}
-                                            className={`h-20 border-b theme-border relative ${
-                                                track.muted ? 'opacity-50' : ''
-                                            }`}
-                                            onDragOver={(e) => !isLocked && e.preventDefault()}
-                                            onDrop={(e) => {
-                                                if (isLocked) return;
-                                                const audioId = e.dataTransfer.getData('audioId');
-                                                if (audioId && selectedAudio) {
-                                                    const rect = e.currentTarget.getBoundingClientRect();
-                                                    let x = (e.clientX - rect.left + e.currentTarget.parentElement!.scrollLeft) / pixelsPerSecond;
-                                                    x = snapToGridTime(x);
-                                                    saveUndoState();
-                                                    setTracks(prev => prev.map(t =>
-                                                        t.id === track.id ? {
-                                                            ...t,
-                                                            clips: [...t.clips, {
-                                                                id: `clip_${Date.now()}`,
-                                                                audioId: selectedAudio.id,
-                                                                startTime: x,
-                                                                duration: selectedAudio.duration || 10,
-                                                                offset: 0,
-                                                                name: selectedAudio.name,
-                                                                gain: 1,
-                                                                fadeIn: 0,
-                                                                fadeOut: 0
-                                                            }]
-                                                        } : t
-                                                    ));
-                                                }
-                                            }}
-                                            onClick={(e) => {
-                                                if (e.target === e.currentTarget) {
-                                                    const rect = e.currentTarget.getBoundingClientRect();
-                                                    let x = (e.clientX - rect.left + e.currentTarget.parentElement!.scrollLeft) / pixelsPerSecond;
-                                                    if (snapToGrid) x = snapToGridTime(x);
-                                                    setEditorPlayhead(x);
-                                                    setSelectedClipId(null);
-                                                }
-                                            }}
-                                        >
-                                            {markers.map(t => (
-                                                <div
-                                                    key={t}
-                                                    className="absolute top-0 bottom-0 w-px theme-bg-secondary"
-                                                    style={{ left: `${t * pixelsPerSecond}px` }}
-                                                />
-                                            ))}
-
-                                            <div className="absolute inset-x-0 top-1/2 h-px theme-bg-tertiary pointer-events-none"/>
-
-                                            {track.clips.map(clip => {
-                                                const audioFile = audioFiles.find(f => f.id === clip.audioId);
-                                                const waveform = waveformCache.get(clip.audioId);
-                                                const hiResData = waveformDataCache.get(clip.audioId);
-                                                const trackColor = TRACK_COLORS[clip.color ?? track.color] || TRACK_COLORS[0];
-                                                const clipWidth = Math.max(clip.duration * pixelsPerSecond, 20);
-                                                const clipHeight = track.height - 8;
-                                                const fadeInWidth = (clip.fadeIn || 0) * pixelsPerSecond;
-                                                const fadeOutWidth = (clip.fadeOut || 0) * pixelsPerSecond;
-
-                                                if (!waveform && audioFile) {
-                                                    loadWaveform(audioFile.path, clip.audioId);
-                                                }
-
-                                                const waveformPath = hiResData && audioFile?.duration
-                                                    ? renderWaveformPath(clip.audioId, clipWidth, clipHeight - 16, clip.offset, clip.duration, audioFile.duration)
-                                                    : '';
-
-                                                return (
-                                                    <div
-                                                        key={clip.id}
-                                                        onClick={(e) => { e.stopPropagation(); setSelectedClipId(clip.id); }}
-                                                        onDoubleClick={() => setEditorPlayhead(clip.startTime)}
-                                                        onContextMenu={(e) => {
-                                                            e.preventDefault();
-                                                            setContextMenu({ x: e.clientX, y: e.clientY, clipId: clip.id, trackId: track.id });
-                                                        }}
-                                                        onMouseDown={(e) => {
-                                                            if (isLocked) return;
-                                                            const rect = e.currentTarget.getBoundingClientRect();
-                                                            const relX = e.clientX - rect.left;
-
-                                                            if (selectedClipId === clip.id) {
-                                                                if (relX < fadeInWidth + 10 && relX < 20) {
-                                                                    setDragState({ type: 'fade-in', clipId: clip.id, trackId: track.id, startX: e.clientX, startTime: clip.fadeIn || 0, originalClip: {...clip} });
-                                                                    e.preventDefault();
-                                                                    return;
-                                                                }
-                                                                if (relX > clipWidth - fadeOutWidth - 10 && relX > clipWidth - 20) {
-                                                                    setDragState({ type: 'fade-out', clipId: clip.id, trackId: track.id, startX: e.clientX, startTime: clip.fadeOut || 0, originalClip: {...clip} });
-                                                                    e.preventDefault();
-                                                                    return;
-                                                                }
-
-                                                                if (relX < 6) {
-                                                                    setDragState({ type: 'resize-left', clipId: clip.id, trackId: track.id, startX: e.clientX, startTime: clip.startTime, originalClip: {...clip} });
-                                                                    e.preventDefault();
-                                                                    return;
-                                                                }
-                                                                if (relX > clipWidth - 6) {
-                                                                    setDragState({ type: 'resize-right', clipId: clip.id, trackId: track.id, startX: e.clientX, startTime: clip.duration, originalClip: {...clip} });
-                                                                    e.preventDefault();
-                                                                    return;
-                                                                }
-                                                            }
-
-                                                            if (editorTool === 'move' || e.altKey) {
-                                                                setDragState({ type: 'move', clipId: clip.id, trackId: track.id, startX: e.clientX, startTime: clip.startTime, originalClip: {...clip} });
-                                                                e.preventDefault();
-                                                            }
-                                                        }}
-                                                        className={`absolute rounded-sm cursor-pointer overflow-hidden ${
-                                                            selectedClipId === clip.id
-                                                                ? 'ring-2 ring-white shadow-lg z-10'
-                                                                : 'hover:ring-1 hover:ring-white/50'
-                                                        } ${isLocked ? 'opacity-60' : ''} ${
-                                                            dragState?.clipId === clip.id ? 'opacity-80' : ''
-                                                        }`}
-                                                        style={{
-                                                            left: `${clip.startTime * pixelsPerSecond}px`,
-                                                            width: `${clipWidth}px`,
-                                                            top: '4px',
-                                                            height: `${clipHeight}px`,
-                                                        }}
-                                                    >
-                                                        <div className={`absolute inset-0 bg-gradient-to-b ${trackColor.bg}`} style={{ opacity: track.solo ? 0.9 : 0.85 }}/>
-
-                                                        <div className="relative px-1.5 py-0.5 flex items-center gap-1 bg-black/30">
-                                                            <span className="text-[10px] truncate font-medium flex-1">{clip.name}</span>
-                                                            {(clip.gain ?? 1) !== 1 && (
-                                                                <span className="text-[9px] bg-black/40 px-1 rounded">
-                                                                    {clip.gain! > 1 ? '+' : ''}{((clip.gain! - 1) * 100).toFixed(0)}%
-                                                                </span>
-                                                            )}
-                                                        </div>
-
-                                                        <div className="absolute inset-x-0 top-5 bottom-0 overflow-hidden">
-                                                            <svg
-                                                                className="w-full h-full"
-                                                                viewBox={`0 0 ${clipWidth} ${clipHeight - 16}`}
-                                                                preserveAspectRatio="none"
-                                                            >
-                                                                {waveformPath ? (
-                                                                    <path
-                                                                        d={waveformPath}
-                                                                        fill="rgba(255,255,255,0.5)"
-                                                                        stroke="rgba(255,255,255,0.8)"
-                                                                        strokeWidth="0.5"
-                                                                    />
-                                                                ) : waveform ? (
-
-                                                                    waveform.map((v, i) => (
-                                                                        <rect
-                                                                            key={i}
-                                                                            x={(i / waveform.length) * clipWidth}
-                                                                            y={(clipHeight - 16) / 2 - v * (clipHeight - 20) / 2}
-                                                                            width={Math.max(clipWidth / waveform.length - 0.5, 1)}
-                                                                            height={Math.max(v * (clipHeight - 20), 1)}
-                                                                            fill="rgba(255,255,255,0.5)"
-                                                                        />
-                                                                    ))
-                                                                ) : (
-
-                                                                    <text x="50%" y="50%" textAnchor="middle" fill="rgba(255,255,255,0.4)" fontSize="10">Loading...</text>
-                                                                )}
-
-                                                                {fadeInWidth > 0 && (
-                                                                    <>
-                                                                        <defs>
-                                                                            <linearGradient id={`fadeIn-${clip.id}`} x1="0%" y1="0%" x2="100%" y2="0%">
-                                                                                <stop offset="0%" stopColor="black" stopOpacity="0.7"/>
-                                                                                <stop offset="100%" stopColor="black" stopOpacity="0"/>
-                                                                            </linearGradient>
-                                                                        </defs>
-                                                                        <rect x="0" y="0" width={fadeInWidth} height={clipHeight - 16} fill={`url(#fadeIn-${clip.id})`}/>
-                                                                        <line x1={fadeInWidth} y1="0" x2="0" y2={clipHeight - 16} stroke="white" strokeWidth="1" strokeDasharray="2,2" opacity="0.5"/>
-                                                                    </>
-                                                                )}
-
-                                                                {fadeOutWidth > 0 && (
-                                                                    <>
-                                                                        <defs>
-                                                                            <linearGradient id={`fadeOut-${clip.id}`} x1="0%" y1="0%" x2="100%" y2="0%">
-                                                                                <stop offset="0%" stopColor="black" stopOpacity="0"/>
-                                                                                <stop offset="100%" stopColor="black" stopOpacity="0.7"/>
-                                                                            </linearGradient>
-                                                                        </defs>
-                                                                        <rect x={clipWidth - fadeOutWidth} y="0" width={fadeOutWidth} height={clipHeight - 16} fill={`url(#fadeOut-${clip.id})`}/>
-                                                                        <line x1={clipWidth - fadeOutWidth} y1={clipHeight - 16} x2={clipWidth} y2="0" stroke="white" strokeWidth="1" strokeDasharray="2,2" opacity="0.5"/>
-                                                                    </>
-                                                                )}
-                                                            </svg>
-                                                        </div>
-
-                                                        {selectedClipId === clip.id && !isLocked && (
-                                                            <>
-                                                                <div className="absolute left-0 top-0 bottom-0 w-1.5 cursor-w-resize bg-white/30 hover:bg-white/60 transition-colors"/>
-                                                                <div className="absolute right-0 top-0 bottom-0 w-1.5 cursor-e-resize bg-white/30 hover:bg-white/60 transition-colors"/>
-
-                                                                <div
-                                                                    className="absolute top-0 w-3 h-3 bg-yellow-400 rounded-full cursor-ew-resize border border-white shadow-md"
-                                                                    style={{ left: `${fadeInWidth - 6}px`, transform: 'translateY(-1px)' }}
-                                                                    title="Drag to adjust fade in"
-                                                                />
-
-                                                                <div
-                                                                    className="absolute top-0 w-3 h-3 bg-yellow-400 rounded-full cursor-ew-resize border border-white shadow-md"
-                                                                    style={{ right: `${fadeOutWidth - 6}px`, transform: 'translateY(-1px)' }}
-                                                                    title="Drag to adjust fade out"
-                                                                />
-                                                            </>
-                                                        )}
-                                                    </div>
-                                                );
-                                            })}
-
-                                            <div
-                                                className="absolute top-0 bottom-0 w-0.5 bg-red-500 z-10 pointer-events-none shadow-lg shadow-red-500/50"
-                                                style={{ left: `${editorPlayhead * pixelsPerSecond}px` }}
-                                            />
-
-                                            {selectionRange && (
-                                                <div
-                                                    className="absolute top-0 bottom-0 bg-blue-500/20 border-l border-r border-blue-500 pointer-events-none"
-                                                    style={{
-                                                        left: `${selectionRange.start * pixelsPerSecond}px`,
-                                                        width: `${(selectionRange.end - selectionRange.start) * pixelsPerSecond}px`
-                                                    }}
-                                                />
-                                            )}
-                                        </div>
-                                    );
-                                })}
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <div className="h-14 border-t theme-border theme-bg-secondary flex items-center px-4 gap-3">
-                    <div className="bg-black rounded px-3 py-1.5 font-mono text-lg text-green-400 tracking-wider w-32 text-center">
-                        {formatTimeMs(editorPlayhead)}
-                    </div>
-
-                    <div className="flex items-center gap-1">
-                        <button
-                            onClick={() => { setEditorPlayhead(0); stopEditorTimeline(); }}
-                            className="p-2 theme-hover rounded"
-                            title="Go to Start (Home)"
-                        >
-                            <SkipBack size={18}/>
-                        </button>
-                        <button
-                            onClick={() => setEditorPlayhead(prev => Math.max(0, prev - 5))}
-                            className="p-2 theme-hover rounded"
-                            title="Rewind 5s"
-                        >
-                            <Rewind size={18}/>
-                        </button>
-                        <button
-                            onClick={() => { stopEditorTimeline(); }}
-                            className={`p-2.5 rounded ${isEditorPlaying ? 'theme-bg-tertiary' : 'theme-hover'}`}
-                            title="Stop"
-                        >
-                            <Square size={18} fill={isEditorPlaying ? 'currentColor' : 'none'}/>
-                        </button>
-                        <button
-                            onClick={() => isEditorPlaying ? stopEditorTimeline() : playEditorTimeline()}
-                            className={`p-3 rounded-full ${isEditorPlaying ? 'bg-yellow-600 hover:bg-yellow-700' : 'bg-purple-600 hover:bg-purple-700'}`}
-                            title={isEditorPlaying ? 'Pause (Space)' : 'Play (Space)'}
-                        >
-                            {isEditorPlaying ? <Pause size={22}/> : <Play size={22} fill="currentColor"/>}
-                        </button>
-                        <button
-                            onClick={() => setEditorPlayhead(prev => prev + 5)}
-                            className="p-2 theme-hover rounded"
-                            title="Forward 5s"
-                        >
-                            <FastForward size={18}/>
-                        </button>
-                        <button
-                            onClick={() => {
-                                const maxTime = Math.max(...tracks.flatMap(t => t.clips.map(c => c.startTime + c.duration)), 0);
-                                setEditorPlayhead(maxTime);
-                            }}
-                            className="p-2 theme-hover rounded"
-                            title="Go to End (End)"
-                        >
-                            <SkipForward size={18}/>
-                        </button>
-                    </div>
-
-                    <div className="w-px h-8 theme-bg-tertiary mx-2"/>
-                    <button
-                        onClick={() => setLoopEnabled(!loopEnabled)}
-                        className={`p-2 rounded ${loopEnabled ? 'bg-blue-600' : 'theme-hover'}`}
-                        title="Loop"
-                    >
-                        <Repeat size={16}/>
-                    </button>
-
-                    <div className="flex-1 flex items-center justify-center">
-                        <span className="text-xs theme-text-muted">
-                            Duration: {formatTime(Math.max(...tracks.flatMap(t => t.clips.map(c => c.startTime + c.duration)), 0))}
-                        </span>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                        <Volume2 size={14} className="theme-text-muted"/>
-                        <input
-                            type="range"
-                            min={0}
-                            max={1.5}
-                            step={0.01}
-                            value={masterVolume}
-                            onChange={(e) => setMasterVolume(parseFloat(e.target.value))}
-                            className="w-20 h-1.5 accent-purple-500"
-                        />
-                        <span className="text-xs theme-text-muted w-8">{Math.round(masterVolume * 100)}%</span>
-                    </div>
-
-                    <div className="w-px h-8 theme-bg-tertiary mx-2"/>
-                    <button
-                        onClick={exportTimeline}
-                        className="px-3 py-1.5 bg-green-600 hover:bg-green-700 rounded text-sm flex items-center gap-2 font-medium"
-                        title="Export to WAV"
-                    >
-                        <Download size={14}/> Export
-                    </button>
-                </div>
-
-                {contextMenu && (
-                    <div
-                        className="fixed theme-bg-secondary border theme-border rounded-lg shadow-xl py-1 z-50 min-w-[180px]"
-                        style={{ left: contextMenu.x, top: contextMenu.y }}
-                        onClick={(e) => e.stopPropagation()}
-                    >
-                        {contextMenu.clipId && (
-                            <>
-                                <div className="px-3 py-1 text-[10px] theme-text-muted uppercase">Clip Actions</div>
-                                <button
-                                    onClick={() => duplicateClip(contextMenu.clipId!)}
-                                    className="w-full px-3 py-1.5 text-left text-sm theme-hover flex items-center gap-2"
-                                >
-                                    <Copy size={12}/> Duplicate
-                                </button>
-                                <button
-                                    onClick={() => { cutClip(); setContextMenu(null); }}
-                                    className="w-full px-3 py-1.5 text-left text-sm theme-hover flex items-center gap-2"
-                                >
-                                    <Scissors size={12}/> Cut
-                                </button>
-                                <button
-                                    onClick={() => { deleteClip(); setContextMenu(null); }}
-                                    className="w-full px-3 py-1.5 text-left text-sm theme-hover flex items-center gap-2 text-red-400"
-                                >
-                                    <Trash2 size={12}/> Delete
-                                </button>
-                                <div className="border-t theme-border my-1"/>
-                                <div className="px-3 py-1 text-[10px] theme-text-muted uppercase">Processing</div>
-                                <button
-                                    onClick={() => normalizeClip(contextMenu.clipId!)}
-                                    className="w-full px-3 py-1.5 text-left text-sm theme-hover flex items-center gap-2"
-                                >
-                                    <BarChart3 size={12}/> Normalize
-                                </button>
-                                <button
-                                    onClick={() => addFadeToClip(contextMenu.clipId!, 'in', 0.5)}
-                                    className="w-full px-3 py-1.5 text-left text-sm theme-hover flex items-center gap-2"
-                                >
-                                    <ChevronRight size={12} className="rotate-180"/> Add Fade In
-                                </button>
-                                <button
-                                    onClick={() => addFadeToClip(contextMenu.clipId!, 'out', 0.5)}
-                                    className="w-full px-3 py-1.5 text-left text-sm theme-hover flex items-center gap-2"
-                                >
-                                    <ChevronRight size={12}/> Add Fade Out
-                                </button>
-                                <div className="border-t theme-border my-1"/>
-                                <div className="px-3 py-1 text-[10px] theme-text-muted uppercase">Gain</div>
-                                <div className="px-3 py-1.5 flex items-center gap-2">
-                                    <input
-                                        type="range"
-                                        min={0}
-                                        max={2}
-                                        step={0.1}
-                                        defaultValue={1}
-                                        onChange={(e) => adjustClipGain(contextMenu.clipId!, parseFloat(e.target.value))}
-                                        className="flex-1 h-1.5 accent-purple-500"
-                                    />
-                                    <span className="text-xs w-10">Gain</span>
-                                </div>
-                                <div className="border-t theme-border my-1"/>
-                                <div className="px-3 py-1 text-[10px] theme-text-muted uppercase">Color</div>
-                                <div className="px-3 py-1.5 flex gap-1 flex-wrap">
-                                    {TRACK_COLORS.map((color, i) => (
-                                        <button
-                                            key={i}
-                                            onClick={() => setClipColor(contextMenu.clipId!, i)}
-                                            className={`w-5 h-5 rounded-full bg-gradient-to-b ${color.bg} border theme-border hover:scale-110 transition-transform`}
-                                        />
-                                    ))}
-                                </div>
-                            </>
-                        )}
-                    </div>
-                )}
-
-                {markers.length > 0 && (
-                    <div className="absolute left-52 right-0 top-10 h-6 pointer-events-none z-20">
-                        {markers.map(marker => (
-                            <div
-                                key={marker.id}
-                                className="absolute top-0 flex flex-col items-center pointer-events-auto cursor-pointer"
-                                style={{ left: `${marker.time * 50 * editorZoom}px` }}
-                                onClick={() => setEditorPlayhead(marker.time)}
-                            >
-                                <div className="w-0 h-0 border-l-[6px] border-r-[6px] border-t-[8px] border-l-transparent border-r-transparent" style={{ borderTopColor: marker.color }}/>
-                                <span className="text-[9px] theme-bg-primary px-1 rounded whitespace-nowrap">{marker.name}</span>
-                            </div>
-                        ))}
-                    </div>
-                )}
-            </div>
-        );
-    };
-
-    const renderDJMixer = () => {
-        const HOT_CUE_COLORS = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6', '#ec4899'];
-        const LOOP_SIZES = [0.25, 0.5, 1, 2, 4, 8, 16, 32];
-
-        const renderDeck = (deck: DJDeck, setDeck: React.Dispatch<React.SetStateAction<DJDeck>>, label: string, audioRef: React.RefObject<HTMLAudioElement>, isLeft: boolean) => {
-            const waveform = deck.audioFile ? waveformCache.get(deck.audioFile.id) : null;
-            const hiResWaveform = deck.audioFile ? waveformDataCache.get(deck.audioFile.id) : null;
-            const accentColor = isLeft ? 'blue' : 'orange';
-            const accentClass = isLeft ? 'text-blue-400' : 'text-orange-400';
-            const bgAccent = isLeft ? 'bg-blue-600' : 'bg-orange-600';
-            const bgAccentHover = isLeft ? 'hover:bg-blue-700' : 'hover:bg-orange-700';
-
-            if (deck.audioFile && !waveform) {
-                loadWaveform(deck.audioFile.path, deck.audioFile.id);
-            }
-
-            const setHotCue = (index: number) => {
-                if (deck.hotCues[index] === null) {
-
-                    setDeck(prev => {
-                        const newCues = [...prev.hotCues];
-                        newCues[index] = prev.currentTime;
-                        return { ...prev, hotCues: newCues };
-                    });
-                } else {
-
-                    if (audioRef.current) {
-                        audioRef.current.currentTime = deck.hotCues[index]!;
-                    }
-                    setDeck(prev => ({ ...prev, currentTime: prev.hotCues[index]! }));
-                }
-            };
-
-            const clearHotCue = (index: number, e: React.MouseEvent) => {
-                e.preventDefault();
-                setDeck(prev => {
-                    const newCues = [...prev.hotCues];
-                    newCues[index] = null;
-                    return { ...prev, hotCues: newCues };
-                });
-            };
-
-            const setLoopPoint = (point: 'in' | 'out') => {
-                setDeck(prev => ({
-                    ...prev,
-                    [point === 'in' ? 'loopIn' : 'loopOut']: prev.currentTime,
-                    loopActive: point === 'out' && prev.loopIn !== null
-                }));
-            };
-
-            const setAutoLoop = (beats: number) => {
-                const bpm = deck.audioFile?.bpm || 120;
-                const loopDuration = (beats / bpm) * 60;
-                setDeck(prev => ({
-                    ...prev,
-                    loopIn: prev.currentTime,
-                    loopOut: prev.currentTime + loopDuration,
-                    loopActive: true
-                }));
-            };
-
-            return (
-                <div className="flex-1 flex flex-col theme-bg-primary min-w-0">
-                    <div className={`h-8 flex items-center justify-between px-3 ${isLeft ? 'bg-blue-900/40' : 'bg-orange-900/40'} border-b theme-border`}>
-                        <div className="flex items-center gap-2">
-                            <span className={`text-lg font-bold ${accentClass}`}>{label}</span>
-                            <span className="text-[10px] theme-text-muted uppercase">Deck</span>
-                        </div>
-                        <span className="text-xs theme-text-muted truncate max-w-[150px]">{deck.audioFile?.name || 'No Track'}</span>
-                    </div>
-
-                    <div
-                        className="h-8 bg-black/50 border-b theme-border relative cursor-pointer"
-                        onClick={(e) => {
-                            if (!deck.audioFile?.duration) return;
-                            const rect = e.currentTarget.getBoundingClientRect();
-                            const x = e.clientX - rect.left;
-                            const newTime = (x / rect.width) * deck.audioFile.duration;
-                            if (audioRef.current) audioRef.current.currentTime = newTime;
-                            setDeck(prev => ({ ...prev, currentTime: newTime }));
-                        }}
-                    >
-                        {waveform && (
-                            <svg className="w-full h-full" viewBox="0 0 200 32" preserveAspectRatio="none">
-                                {waveform.map((v, i) => (
-                                    <rect
-                                        key={i}
-                                        x={i}
-                                        y={16 - v * 14}
-                                        width="1"
-                                        height={v * 28}
-                                        fill={i / 200 < (deck.currentTime / (deck.audioFile?.duration || 1))
-                                            ? (isLeft ? '#1E40AF' : '#9A3412')
-                                            : (isLeft ? '#3B82F6' : '#F97316')}
-                                        opacity={i / 200 < (deck.currentTime / (deck.audioFile?.duration || 1)) ? 0.6 : 1}
-                                    />
-                                ))}
-                            </svg>
-                        )}
-                        {deck.audioFile?.duration && (
-                            <div
-                                className="absolute top-0 bottom-0 w-0.5 bg-white"
-                                style={{ left: `${(deck.currentTime / deck.audioFile.duration) * 100}%` }}
-                            />
-                        )}
-                        {deck.audioFile?.duration && deck.hotCues.map((cue, i) => {
-                            if (cue === null) return null;
-                            return (
-                                <div
-                                    key={i}
-                                    className="absolute top-0 w-1 h-2 rounded-b-sm"
-                                    style={{
-                                        left: `${(cue / deck.audioFile!.duration!) * 100}%`,
-                                        backgroundColor: HOT_CUE_COLORS[i]
-                                    }}
-                                />
-                            );
-                        })}
-                        {deck.audioFile?.duration && deck.loopIn !== null && deck.loopOut !== null && (
-                            <div
-                                className="absolute top-0 bottom-0 border-x-2"
-                                style={{
-                                    left: `${(deck.loopIn / deck.audioFile.duration) * 100}%`,
-                                    width: `${((deck.loopOut - deck.loopIn) / deck.audioFile.duration) * 100}%`,
-                                    backgroundColor: deck.loopActive ? 'rgba(34, 197, 94, 0.2)' : 'rgba(100, 100, 100, 0.2)',
-                                    borderColor: deck.loopActive ? '#22c55e' : '#666'
-                                }}
-                            />
-                        )}
-                    </div>
-
-                    <div className="h-20 bg-black border-b theme-border relative overflow-hidden">
-                        {hiResWaveform && deck.audioFile?.duration ? (
-                            <div className="absolute inset-0">
-                                <svg className="w-full h-full" preserveAspectRatio="none">
-                                    <defs>
-                                        <linearGradient id={`waveGrad${label}`} x1="0%" y1="0%" x2="0%" y2="100%">
-                                            <stop offset="0%" stopColor={isLeft ? '#3B82F6' : '#F97316'}/>
-                                            <stop offset="50%" stopColor={isLeft ? '#1E40AF' : '#C2410C'}/>
-                                            <stop offset="100%" stopColor={isLeft ? '#3B82F6' : '#F97316'}/>
-                                        </linearGradient>
-                                    </defs>
-                                    {(() => {
-                                        const duration = deck.audioFile?.duration || 1;
-                                        const visibleSeconds = 10;
-                                        const centerTime = deck.currentTime;
-                                        const startTime = Math.max(0, centerTime - visibleSeconds / 2);
-                                        const endTime = Math.min(duration, centerTime + visibleSeconds / 2);
-
-                                        const totalSamples = hiResWaveform.length / 2;
-                                        const samplesPerSecond = totalSamples / duration;
-                                        const startSample = Math.floor(startTime * samplesPerSecond);
-                                        const endSample = Math.floor(endTime * samplesPerSecond);
-
-                                        const points: JSX.Element[] = [];
-                                        const step = Math.max(1, Math.floor((endSample - startSample) / 200));
-
-                                        for (let i = startSample; i < endSample; i += step) {
-                                            if (i * 2 + 1 >= hiResWaveform.length) break;
-                                            const min = hiResWaveform[i * 2];
-                                            const max = hiResWaveform[i * 2 + 1];
-                                            const x = ((i / samplesPerSecond - startTime) / visibleSeconds) * 100;
-                                            const yTop = 50 - max * 45;
-                                            const height = (max - min) * 45;
-
-                                            const sampleTime = i / samplesPerSecond;
-                                            const isPast = sampleTime < centerTime;
-
-                                            points.push(
-                                                <rect
-                                                    key={i}
-                                                    x={`${x}%`}
-                                                    y={yTop}
-                                                    width="0.5%"
-                                                    height={Math.max(height, 1)}
-                                                    fill={isPast ? (isLeft ? '#1E40AF' : '#9A3412') : `url(#waveGrad${label})`}
-                                                    opacity={isPast ? 0.5 : 1}
-                                                />
-                                            );
-                                        }
-                                        return points;
-                                    })()}
-
-                                    <line x1="50%" y1="0" x2="50%" y2="100" stroke="white" strokeWidth="2"/>
-
-                                    {deck.loopIn !== null && deck.loopOut !== null && (
-                                        <rect
-                                            x={`${((deck.loopIn - (deck.currentTime - 5)) / 10) * 100}%`}
-                                            y="0"
-                                            width={`${((deck.loopOut - deck.loopIn) / 10) * 100}%`}
-                                            height="100"
-                                            fill={deck.loopActive ? 'rgba(34, 197, 94, 0.2)' : 'rgba(100, 100, 100, 0.2)'}
-                                            stroke={deck.loopActive ? '#22c55e' : '#666'}
-                                            strokeWidth="1"
-                                        />
-                                    )}
-
-                                    {deck.hotCues.map((cue, i) => {
-                                        if (cue === null) return null;
-                                        const x = ((cue - (deck.currentTime - 5)) / 10) * 100;
-                                        if (x < 0 || x > 100) return null;
-                                        return (
-                                            <g key={i}>
-                                                <line x1={`${x}%`} y1="0" x2={`${x}%`} y2="100" stroke={HOT_CUE_COLORS[i]} strokeWidth="1" strokeDasharray="2,2"/>
-                                                <circle cx={`${x}%`} cy="8" r="4" fill={HOT_CUE_COLORS[i]}/>
-                                            </g>
-                                        );
-                                    })}
-
-                                    {deck.beatGrid.length > 0 && (() => {
-                                        const lines: JSX.Element[] = [];
-                                        const visibleSeconds = 10;
-                                        const startTime = Math.max(0, deck.currentTime - visibleSeconds / 2);
-                                        const endTime = deck.currentTime + visibleSeconds / 2;
-
-                                        deck.beatGrid.forEach((beat, i) => {
-                                            if (beat >= startTime && beat <= endTime) {
-                                                const x = ((beat - startTime) / visibleSeconds) * 100;
-                                                const isBeat4 = i % 4 === 0;
-                                                const isBeat16 = i % 16 === 0;
-                                                lines.push(
-                                                    <line
-                                                        key={`beat-${i}`}
-                                                        x1={`${x}%`}
-                                                        y1={isBeat16 ? 0 : isBeat4 ? 15 : 25}
-                                                        x2={`${x}%`}
-                                                        y2={isBeat16 ? 80 : isBeat4 ? 65 : 55}
-                                                        stroke={isBeat16 ? '#fff' : isBeat4 ? 'rgba(255,255,255,0.5)' : 'rgba(255,255,255,0.2)'}
-                                                        strokeWidth={isBeat16 ? 1.5 : 0.5}
-                                                    />
-                                                );
-                                            }
-                                        });
-                                        return lines;
-                                    })()}
-                                </svg>
-                            </div>
-                        ) : waveform ? (
-                            <div className="absolute inset-0 flex items-center opacity-30">
-                                <svg className="w-full h-full" viewBox="0 0 200 80" preserveAspectRatio="none">
-                                    {waveform.map((v, i) => (
-                                        <rect key={i} x={i} y={40 - v * 35} width="0.8" height={v * 70} fill={isLeft ? '#3B82F6' : '#F97316'}/>
-                                    ))}
-                                </svg>
-                            </div>
-                        ) : (
-                            <div className="flex items-center justify-center h-full theme-text-muted text-sm">
-                                {deck.audioFile ? 'Loading...' : 'Load a track'}
-                            </div>
-                        )}
-
-                        <div className="absolute bottom-1 left-2 bg-black/70 px-1.5 py-0.5 rounded">
-                            <span className="text-sm font-mono text-white">{formatTime(deck.currentTime)}</span>
-                        </div>
-                        <div className="absolute bottom-1 right-2 bg-black/70 px-1.5 py-0.5 rounded">
-                            <span className="text-sm font-mono text-red-400">-{formatTime((deck.audioFile?.duration || 0) - deck.currentTime)}</span>
-                        </div>
-                    </div>
-
-                    <div className="h-8 flex items-center justify-between px-2 theme-bg-primary border-b theme-border">
-                        <div className="flex items-center gap-2">
-                            <button
-                                onClick={() => nudgeDeck(deck, setDeck, audioRef, -0.02)}
-                                className="px-1.5 py-0.5 theme-bg-secondary theme-hover rounded text-[9px] font-bold"
-                                title="Nudge backward"
-                            >-</button>
-                            <div className="flex items-center gap-1">
-                                <span className="text-base font-bold font-mono text-white">{deck.audioFile?.bpm || '---'}</span>
-                                <span className="text-[8px] theme-text-muted">BPM</span>
-                            </div>
-                            <button
-                                onClick={() => nudgeDeck(deck, setDeck, audioRef, 0.02)}
-                                className="px-1.5 py-0.5 theme-bg-secondary theme-hover rounded text-[9px] font-bold"
-                                title="Nudge forward"
-                            >+</button>
-                        </div>
-                        <div className="flex items-center gap-2">
-                            <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${deck.audioFile?.key ? (isLeft ? 'bg-blue-900/50 text-blue-300' : 'bg-orange-900/50 text-orange-300') : 'theme-text-muted'}`}>
-                                {deck.audioFile?.key || '--'}
-                            </span>
-                            <button
-                                onClick={() => setDeck(prev => ({ ...prev, keyLock: !prev.keyLock }))}
-                                className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${deck.keyLock ? 'bg-green-600 text-white' : 'theme-bg-secondary theme-text-muted theme-hover'}`}
-                                title="Key Lock"
-                            >
-                                KEY
-                            </button>
-                        </div>
-                        <div className={`text-sm font-mono ${deck.speed !== 1 ? (deck.speed > 1 ? 'text-green-400' : 'text-red-400') : 'theme-text-muted'}`}>
-                            {deck.speed > 1 ? '+' : ''}{((deck.speed - 1) * 100).toFixed(1)}%
-                        </div>
-                    </div>
-
-                    <div className="flex-1 flex min-h-0">
-                        <div className="w-28 shrink-0 border-r theme-border px-2 py-2 flex flex-col gap-1 overflow-hidden">
-                            <div className="text-[9px] theme-text-muted font-semibold tracking-wider text-center mb-1">EQ</div>
-                            {(['high', 'mid', 'low'] as const).map(band => (
-                                <div key={band} className="flex items-center gap-1.5 min-w-0">
-                                    <button
-                                        onClick={() => setDeck(prev => ({
-                                            ...prev,
-                                            eqKill: { ...prev.eqKill, [band]: !prev.eqKill[band] }
-                                        }))}
-                                        title={`Kill ${band}`}
-                                        className={`shrink-0 w-7 h-5 text-[9px] font-bold rounded ${
-                                            deck.eqKill[band] ? 'bg-red-600 text-white' : 'theme-bg-secondary theme-text-muted theme-hover'
-                                        }`}
-                                    >
-                                        {band === 'high' ? 'HI' : band === 'mid' ? 'MID' : 'LO'}
-                                    </button>
-                                    <input
-                                        type="range"
-                                        min={-12}
-                                        max={12}
-                                        value={deck.eqKill[band] ? -12 : deck.eq[band]}
-                                        disabled={deck.eqKill[band]}
-                                        onChange={(e) => setDeck(prev => ({
-                                            ...prev,
-                                            eq: { ...prev.eq, [band]: parseInt(e.target.value) }
-                                        }))}
-                                        className="flex-1 min-w-0 h-1.5 accent-purple-500"
-                                    />
-                                </div>
-                            ))}
-                            <div className="border-t theme-border mt-2 pt-2">
-                                <div className="text-[9px] theme-text-muted font-semibold tracking-wider text-center mb-1">FILTER</div>
-                                <input
-                                    type="range"
-                                    min={0}
-                                    max={100}
-                                    value={deck.filter}
-                                    onChange={(e) => setDeck(prev => ({ ...prev, filter: parseInt(e.target.value) }))}
-                                    className="w-full h-1.5 accent-yellow-500"
-                                />
-                            </div>
-                        </div>
-
-                        <div className="flex-1 flex flex-col p-2 gap-2 min-w-0">
-                            <div className="flex items-center justify-center gap-2">
-                                <button
-                                    onClick={() => {
-                                        if (audioRef.current) audioRef.current.currentTime = deck.hotCues[0] || 0;
-                                        setDeck(prev => ({ ...prev, currentTime: prev.hotCues[0] || 0 }));
-                                    }}
-                                    className="p-2 theme-bg-secondary theme-hover rounded text-yellow-400"
-                                    title="Cue"
-                                >
-                                    <RotateCcw size={14}/>
-                                </button>
-                                <button
-                                    onClick={() => {
-                                        if (audioRef.current) {
-                                            if (deck.playing) audioRef.current.pause();
-                                            else audioRef.current.play();
-                                        }
-                                        setDeck(prev => ({ ...prev, playing: !prev.playing }));
-                                    }}
-                                    className={`p-3 rounded-lg ${deck.playing ? 'bg-green-600 hover:bg-green-700' : `${bgAccent} ${bgAccentHover}`}`}
-                                >
-                                    {deck.playing ? <Pause size={18}/> : <Play size={18} fill="white"/>}
-                                </button>
-                                <button
-                                    onClick={() => {
-
-                                        const otherDeck = isLeft ? deckB : deckA;
-                                        if (otherDeck.audioFile?.bpm && deck.audioFile?.bpm) {
-                                            const ratio = otherDeck.audioFile.bpm / deck.audioFile.bpm;
-                                            const newSpeed = Math.max(0.5, Math.min(2, ratio));
-                                            setDeck(prev => ({ ...prev, speed: newSpeed }));
-                                            if (audioRef.current) audioRef.current.playbackRate = newSpeed;
-                                        }
-                                    }}
-                                    className={`p-2 rounded ${deck.speed === 1 ? 'theme-bg-secondary theme-hover' : 'bg-purple-600'}`}
-                                    title="Sync BPM"
-                                >
-                                    <Repeat size={14}/>
-                                </button>
-                            </div>
-
-                            <div>
-                                <div className="text-[9px] theme-text-muted text-center mb-1">HOT CUES</div>
-                                <div className="grid grid-cols-4 gap-1">
-                                    {[0, 1, 2, 3, 4, 5, 6, 7].map(i => (
-                                        <button
-                                            key={i}
-                                            onClick={() => setHotCue(i)}
-                                            onContextMenu={(e) => clearHotCue(i, e)}
-                                            className={`h-6 rounded text-[10px] font-bold transition-colors ${
-                                                deck.hotCues[i] !== null
-                                                    ? 'text-white shadow-lg'
-                                                    : 'theme-bg-secondary theme-hover theme-text-muted'
-                                            }`}
-                                            style={deck.hotCues[i] !== null ? { backgroundColor: HOT_CUE_COLORS[i] } : {}}
-                                            title={deck.hotCues[i] !== null ? `${formatTime(deck.hotCues[i]!)} (right-click to clear)` : 'Set cue'}
-                                        >
-                                            {i + 1}
-                                        </button>
-                                    ))}
-                                </div>
-                            </div>
-
-                            <div>
-                                <div className="text-[9px] theme-text-muted text-center mb-1">LOOP</div>
-                                <div className="flex gap-1 mb-1">
-                                    <button
-                                        onClick={() => setLoopPoint('in')}
-                                        className={`flex-1 h-5 rounded text-[9px] font-bold ${
-                                            deck.loopIn !== null ? 'bg-green-600' : 'theme-bg-secondary theme-hover'
-                                        }`}
-                                    >
-                                        IN
-                                    </button>
-                                    <button
-                                        onClick={() => setLoopPoint('out')}
-                                        className={`flex-1 h-5 rounded text-[9px] font-bold ${
-                                            deck.loopOut !== null ? 'bg-green-600' : 'theme-bg-secondary theme-hover'
-                                        }`}
-                                    >
-                                        OUT
-                                    </button>
-                                    <button
-                                        onClick={() => setDeck(prev => ({ ...prev, loopActive: !prev.loopActive }))}
-                                        disabled={deck.loopIn === null || deck.loopOut === null}
-                                        className={`flex-1 h-5 rounded text-[9px] font-bold ${
-                                            deck.loopActive ? 'bg-green-500 animate-pulse' : 'theme-bg-secondary theme-hover'
-                                        } disabled:opacity-40`}
-                                    >
-                                        {deck.loopActive ? 'ON' : 'OFF'}
-                                    </button>
-                                    <button
-                                        onClick={() => setDeck(prev => ({ ...prev, loopIn: null, loopOut: null, loopActive: false }))}
-                                        className="flex-1 h-5 rounded text-[9px] font-bold theme-bg-secondary hover:bg-red-600"
-                                    >
-                                        CLR
-                                    </button>
-                                </div>
-                                <div className="grid grid-cols-4 gap-0.5">
-                                    {LOOP_SIZES.map(size => (
-                                        <button
-                                            key={size}
-                                            onClick={() => setAutoLoop(size)}
-                                            className="h-5 rounded text-[9px] theme-bg-secondary hover:bg-purple-600"
-                                        >
-                                            {size >= 1 ? size : `1/${1/size}`}
-                                        </button>
-                                    ))}
-                                </div>
-                            </div>
-                        </div>
-
-                        <div className="w-20 border-l theme-border py-2 flex flex-col items-center gap-1.5">
-                            <div className="text-[9px] theme-text-muted font-semibold tracking-wider">TEMPO</div>
-                            <input
-                                type="range"
-                                min={0.5}
-                                max={1.5}
-                                step={0.001}
-                                value={deck.speed}
-                                onChange={(e) => {
-                                    const speed = parseFloat(e.target.value);
-                                    setDeck(prev => ({ ...prev, speed }));
-                                    if (audioRef.current) audioRef.current.playbackRate = speed;
-                                }}
-                                className="h-32 accent-purple-500"
-                                style={{ writingMode: 'vertical-lr', direction: 'rtl' }}
-                            />
-                            <button
-                                onClick={() => {
-                                    setDeck(prev => ({ ...prev, speed: 1 }));
-                                    if (audioRef.current) audioRef.current.playbackRate = 1;
-                                }}
-                                title="Reset tempo to 0%"
-                                className="w-12 py-0.5 text-[9px] theme-bg-secondary theme-hover rounded"
-                            >
-                                RESET
-                            </button>
-                            <div className="border-t theme-border w-full my-1"/>
-                            <div className="text-[9px] theme-text-muted font-semibold tracking-wider">VOL</div>
-                            <input
-                                type="range"
-                                min={0}
-                                max={1}
-                                step={0.01}
-                                value={deck.volume}
-                                onChange={(e) => {
-                                    const vol = parseFloat(e.target.value);
-                                    setDeck(prev => ({ ...prev, volume: vol }));
-                                    if (audioRef.current) {
-                                        audioRef.current.volume = vol * (isLeft ? Math.max(0, 1 - crossfader * 2) : Math.max(0, crossfader * 2 - 1));
-                                    }
-                                }}
-                                className="h-28 accent-green-500"
-                                style={{ writingMode: 'vertical-lr', direction: 'rtl' }}
-                            />
-                        </div>
-                    </div>
-
-                    <div className="h-9 border-t theme-border flex items-center px-2 gap-1.5">
-                        <button
-                            onClick={() => {
-                                if (selectedAudio) {
-                                    setDeck(prev => ({
-                                        ...defaultDeckState,
-                                        audioFile: selectedAudio,
-                                        volume: prev.volume
-                                    }));
-                                    if (audioRef.current) {
-                                        audioRef.current.src = `file://${selectedAudio.path}`;
-                                        audioRef.current.load();
-                                    }
-                                }
-                            }}
-                            disabled={!selectedAudio}
-                            className={`flex-1 h-6 px-2 rounded text-xs font-medium truncate flex items-center justify-center gap-1.5 ${
-                                selectedAudio ? `${bgAccent} ${bgAccentHover} text-white` : 'theme-bg-secondary theme-text-muted'
-                            }`}
-                        >
-                            <Music size={11}/>
-                            <span className="truncate">{selectedAudio ? selectedAudio.name : 'Select from library'}</span>
-                        </button>
-                        <button
-                            onClick={async () => {
-                                const api = window.api;
-                                if (!api?.showOpenDialog) { alert('file dialog IPC missing — restart app'); return; }
-                                const result = await api.showOpenDialog({
-                                    title: `Open track for Deck ${label}`,
-                                    properties: ['openFile'],
-                                    filters: [
-                                        { name: 'Audio', extensions: ['mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac', 'aiff', 'wma'] },
-                                        { name: 'All Files', extensions: ['*'] },
-                                    ],
-                                });
-                                const picked: string | undefined = Array.isArray(result)
-                                    ? result[0]?.path
-                                    : result?.filePaths?.[0];
-                                if (!picked) return;
-                                const file = {
-                                    id: `picked_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-                                    name: picked.split('/').pop() || picked,
-                                    path: picked,
-                                    duration: 0,
-                                };
-                                setAudioFiles(prev => prev.some(f => f.path === file.path) ? prev : [...prev, file]);
-                                setSelectedAudio(file);
-                                setDeck(prev => ({ ...defaultDeckState, audioFile: file, volume: prev.volume }));
-                                if (audioRef.current) {
-                                    audioRef.current.src = `file://${file.path}`;
-                                    audioRef.current.load();
-                                }
-                            }}
-                            className="h-6 px-2 theme-bg-secondary theme-hover rounded flex items-center gap-1 text-[10px] font-medium theme-text-muted"
-                            title="Browse filesystem for an audio file"
-                        >
-                            <FolderOpen size={11}/>
-                            Browse
-                        </button>
-                        <button
-                            onClick={() => setDeck(prev => ({ ...defaultDeckState, volume: prev.volume }))}
-                            className="h-6 w-6 theme-bg-secondary hover:bg-red-600 hover:text-white rounded flex items-center justify-center"
-                            title="Eject"
-                        >
-                            <X size={12}/>
-                        </button>
-                    </div>
-
-                    <audio
-                        ref={audioRef}
-                        onTimeUpdate={(e) => {
-                            const time = (e.target as HTMLAudioElement).currentTime;
-                            setDeck(prev => ({ ...prev, currentTime: time }));
-
-                            if (deck.loopActive && deck.loopOut !== null && time >= deck.loopOut && deck.loopIn !== null) {
-                                (e.target as HTMLAudioElement).currentTime = deck.loopIn;
-                            }
-                        }}
-                        onEnded={() => setDeck(prev => ({ ...prev, playing: false, currentTime: 0 }))}
-                        onLoadedMetadata={async (e) => {
-                            const audio = e.target as HTMLAudioElement;
-                            if (deck.audioFile) {
-
-                                setDeck(prev => ({
-                                    ...prev,
-                                    audioFile: prev.audioFile ? { ...prev.audioFile, duration: audio.duration } : null
-                                }));
-
-                                try {
-                                    const { bpm, beats, key } = await detectBeats(deck.audioFile.path);
-                                    setDeck(prev => ({
-                                        ...prev,
-                                        audioFile: prev.audioFile ? { ...prev.audioFile, bpm, key } : null,
-                                        beatGrid: beats
-                                    }));
-                                } catch (err) {
-                                    console.error('Beat detection failed:', err);
-
-                                    const estimatedBpm = 120 + Math.floor(Math.random() * 20);
-                                    setDeck(prev => ({
-                                        ...prev,
-                                        audioFile: prev.audioFile ? { ...prev.audioFile, bpm: estimatedBpm, key: 'Am' } : null
-                                    }));
-                                }
-                            }
-                        }}
-                    />
-                </div>
-            );
-        };
-
-        return (
-            <div className="flex-1 flex flex-col overflow-hidden theme-bg-primary">
-                <div className="h-10 border-b theme-border flex items-center px-4 gap-4 theme-bg-primary">
-                    <div className="flex items-center gap-2">
-                        <Disc3 className="text-purple-400" size={18}/>
-                        <span className="text-sm font-bold text-purple-400">DJ MIXER</span>
-                    </div>
-                    <div className="flex-1"/>
-                    <button
-                        onClick={async () => {
-                            const api = window.api;
-                            if (!api?.loadDemoTracks) {
-                                alert('loadDemoTracks IPC not available — restart Electron.');
-                                return;
-                            }
-                            setLoadingDemoTracks(true);
-                            try {
-                                const data = await api.loadDemoTracks();
-                                if (!data?.success) throw new Error(data?.error || 'demo tracks failed');
-                                const newFiles = (data.tracks || []).map((t: any, i: number) => ({
-                                    id: `demo_${Date.now()}_${i}`,
-                                    name: t.name,
-                                    path: t.path,
-                                    duration: 0,
-                                }));
-                                if (newFiles.length === 0) throw new Error('no demo tracks found in bundle');
-                                setAudioFiles(prev => {
-                                    const existing = new Set(prev.map(f => f.path));
-                                    return [...prev, ...newFiles.filter((f: any) => !existing.has(f.path))];
-                                });
-                                // Auto-load deck A + B so the user sees something happen right away.
-                                if (newFiles[0]) {
-                                    setDeckA(prev => ({ ...defaultDeckState, volume: prev.volume, audioFile: newFiles[0] }));
-                                    if (deckARef.current) {
-                                        deckARef.current.src = `file://${newFiles[0].path}`;
-                                        deckARef.current.load();
-                                    }
-                                }
-                                if (newFiles[1]) {
-                                    setDeckB(prev => ({ ...defaultDeckState, volume: prev.volume, audioFile: newFiles[1] }));
-                                    if (deckBRef.current) {
-                                        deckBRef.current.src = `file://${newFiles[1].path}`;
-                                        deckBRef.current.load();
-                                    }
-                                }
-                                setSelectedAudio(newFiles[0] || null);
-                            } catch (e: any) {
-                                alert('Demo track load failed: ' + (e.message || e));
-                            } finally {
-                                setLoadingDemoTracks(false);
-                            }
-                        }}
-                        disabled={loadingDemoTracks}
-                        className="px-3 py-1 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 rounded text-xs text-white flex items-center gap-1.5"
-                        title="Add the bundled demo tracks to your library"
-                    >
-                        {loadingDemoTracks ? <Loader size={12} className="animate-spin"/> : <Sparkles size={12}/>}
-                        Load Demo Tracks
-                    </button>
-                    <div className="flex items-center gap-3">
-                        <span className="text-xs theme-text-muted">MASTER</span>
-                        <input
-                            type="range"
-                            min={0}
-                            max={1.5}
-                            step={0.01}
-                            value={djMasterGain}
-                            onChange={(e) => setDjMasterGain(parseFloat(e.target.value))}
-                            className="w-24 h-1.5 accent-purple-500"
-                        />
-                        <span className="text-xs theme-text-muted w-8">{Math.round(djMasterGain * 100)}%</span>
-                    </div>
-                </div>
-
-                <div className="flex-1 flex overflow-hidden">
-                    {renderDeck(deckA, setDeckA, 'A', deckARef, true)}
-
-                    <div className="w-52 theme-bg-primary border-x theme-border flex flex-col">
-                        <div className="h-32 p-2 border-b theme-border">
-                            <div className="text-[9px] theme-text-muted text-center mb-1">LEVEL</div>
-                            <div className="flex justify-center gap-3 h-full pb-2">
-                                <div className="flex gap-0.5">
-                                    <div className="w-2 h-full theme-bg-secondary rounded-sm relative overflow-hidden">
-                                        <div
-                                            className="absolute bottom-0 w-full rounded-sm"
-                                            style={{
-                                                height: `${Math.min(100, (deckA.playing ? 60 + Math.random() * 30 : 0) * deckA.volume)}%`,
-                                                background: 'linear-gradient(to top, #22c55e, #eab308, #ef4444)'
-                                            }}
-                                        />
-                                    </div>
-                                    <div className="w-2 h-full theme-bg-secondary rounded-sm relative overflow-hidden">
-                                        <div
-                                            className="absolute bottom-0 w-full rounded-sm"
-                                            style={{
-                                                height: `${Math.min(100, (deckA.playing ? 55 + Math.random() * 35 : 0) * deckA.volume)}%`,
-                                                background: 'linear-gradient(to top, #22c55e, #eab308, #ef4444)'
-                                            }}
-                                        />
-                                    </div>
-                                </div>
-                                <div className="flex gap-0.5">
-                                    <div className="w-2 h-full theme-bg-secondary rounded-sm relative overflow-hidden">
-                                        <div
-                                            className="absolute bottom-0 w-full rounded-sm"
-                                            style={{
-                                                height: `${Math.min(100, ((deckA.playing ? 60 : 0) + (deckB.playing ? 60 : 0)) / 2 * djMasterGain)}%`,
-                                                background: 'linear-gradient(to top, #22c55e, #eab308, #ef4444)'
-                                            }}
-                                        />
-                                    </div>
-                                    <div className="w-2 h-full theme-bg-secondary rounded-sm relative overflow-hidden">
-                                        <div
-                                            className="absolute bottom-0 w-full rounded-sm"
-                                            style={{
-                                                height: `${Math.min(100, ((deckA.playing ? 55 : 0) + (deckB.playing ? 55 : 0)) / 2 * djMasterGain)}%`,
-                                                background: 'linear-gradient(to top, #22c55e, #eab308, #ef4444)'
-                                            }}
-                                        />
-                                    </div>
-                                </div>
-                                <div className="flex gap-0.5">
-                                    <div className="w-2 h-full theme-bg-secondary rounded-sm relative overflow-hidden">
-                                        <div
-                                            className="absolute bottom-0 w-full rounded-sm"
-                                            style={{
-                                                height: `${Math.min(100, (deckB.playing ? 58 + Math.random() * 32 : 0) * deckB.volume)}%`,
-                                                background: 'linear-gradient(to top, #22c55e, #eab308, #ef4444)'
-                                            }}
-                                        />
-                                    </div>
-                                    <div className="w-2 h-full theme-bg-secondary rounded-sm relative overflow-hidden">
-                                        <div
-                                            className="absolute bottom-0 w-full rounded-sm"
-                                            style={{
-                                                height: `${Math.min(100, (deckB.playing ? 62 + Math.random() * 28 : 0) * deckB.volume)}%`,
-                                                background: 'linear-gradient(to top, #22c55e, #eab308, #ef4444)'
-                                            }}
-                                        />
-                                    </div>
-                                </div>
-                            </div>
-                            <div className="flex justify-between text-[8px] theme-text-muted">
-                                <span className="text-blue-400">A</span>
-                                <span>M</span>
-                                <span className="text-orange-400">B</span>
-                            </div>
-                        </div>
-
-                        <div className="flex-1 flex flex-col items-center p-3 gap-1">
-                            <div className="text-[9px] theme-text-muted font-semibold tracking-wider mb-1">CROSSFADER</div>
-                            <input
-                                type="range"
-                                min={0}
-                                max={1}
-                                step={0.01}
-                                value={crossfader}
-                                onChange={(e) => {
-                                    const val = parseFloat(e.target.value);
-                                    setCrossfader(val);
-
-                                    let volA = 1, volB = 1;
-                                    if (crossfaderCurve === 'smooth') {
-                                        volA = Math.cos(val * Math.PI / 2);
-                                        volB = Math.sin(val * Math.PI / 2);
-                                    } else if (crossfaderCurve === 'cut') {
-
-                                        volA = val < 0.1 ? 1 : val > 0.9 ? 0 : 1 - ((val - 0.1) / 0.8);
-                                        volB = val > 0.9 ? 1 : val < 0.1 ? 0 : (val - 0.1) / 0.8;
-                                    } else {
-
-                                        volA = 1 - val;
-                                        volB = val;
-                                    }
-                                    if (deckARef.current) deckARef.current.volume = deckA.volume * volA;
-                                    if (deckBRef.current) deckBRef.current.volume = deckB.volume * volB;
-                                }}
-                                className="w-full accent-purple-500"
-                            />
-                            <div className="flex justify-between w-full text-[10px] mt-1">
-                                <span className="text-blue-400 font-bold">A</span>
-                                <span className="text-orange-400 font-bold">B</span>
-                            </div>
-
-                            <div className="mt-4 w-full">
-                                <div className="text-[9px] theme-text-muted font-semibold tracking-wider text-center mb-2">MASTER FX</div>
-                                <div className="space-y-1.5">
-                                    {[
-                                        { name: 'Echo', key: 'echo', color: 'accent-cyan-500' },
-                                        { name: 'Reverb', key: 'reverb', color: 'accent-purple-500' },
-                                        { name: 'Filter', key: 'filter', color: 'accent-yellow-500' },
-                                        { name: 'Flanger', key: 'flanger', color: 'accent-pink-500' }
-                                    ].map(fx => {
-                                        const active = (deckAEffects[fx.key] || 0) > 0 || (deckBEffects[fx.key] || 0) > 0;
-                                        return (
-                                            <div key={fx.key} className="flex items-center gap-1.5">
-                                                <button
-                                                    onClick={() => {
-                                                        setDeckAEffects(prev => ({ ...prev, [fx.key]: prev[fx.key] > 0 ? 0 : 50 }));
-                                                        setDeckBEffects(prev => ({ ...prev, [fx.key]: prev[fx.key] > 0 ? 0 : 50 }));
-                                                    }}
-                                                    className={`w-14 h-5 text-[9px] font-semibold rounded transition-colors ${
-                                                        active ? 'bg-purple-600 text-white' : 'theme-bg-secondary theme-text-muted theme-hover'
-                                                    }`}
-                                                >
-                                                    {fx.name}
-                                                </button>
-                                                <input
-                                                    type="range"
-                                                    min={0}
-                                                    max={100}
-                                                    value={(deckAEffects[fx.key] || 0 + deckBEffects[fx.key] || 0) / 2}
-                                                    onChange={(e) => {
-                                                        const val = parseInt(e.target.value);
-                                                        setDeckAEffects(prev => ({ ...prev, [fx.key]: val }));
-                                                        setDeckBEffects(prev => ({ ...prev, [fx.key]: val }));
-                                                    }}
-                                                    className={`flex-1 h-1 ${fx.color}`}
-                                                />
-                                            </div>
-                                        );
-                                    })}
-                                </div>
-                            </div>
-
-                            <div className="mt-3 flex gap-1 w-full">
-                                {(['linear', 'cut', 'smooth'] as const).map(curve => (
-                                    <button
-                                        key={curve}
-                                        onClick={() => setCrossfaderCurve(curve)}
-                                        className={`flex-1 py-1 text-[9px] font-medium rounded uppercase tracking-wide ${
-                                            crossfaderCurve === curve ? 'bg-purple-600 text-white' : 'theme-bg-secondary theme-hover theme-text-muted'
-                                        }`}
-                                    >
-                                        {curve}
-                                    </button>
-                                ))}
-                            </div>
-
-                            <button
-                                onClick={() => {
-
-                                    const bpmA = deckA.audioFile?.bpm || 120;
-                                    const bpmB = deckB.audioFile?.bpm || 120;
-                                    const avgBpm = (bpmA + bpmB) / 2;
-
-                                    if (deckA.audioFile?.bpm) {
-                                        const speedA = avgBpm / deckA.audioFile.bpm;
-                                        setDeckA(prev => ({ ...prev, speed: speedA }));
-                                        if (deckARef.current) deckARef.current.playbackRate = speedA;
-                                    }
-                                    if (deckB.audioFile?.bpm) {
-                                        const speedB = avgBpm / deckB.audioFile.bpm;
-                                        setDeckB(prev => ({ ...prev, speed: speedB }));
-                                        if (deckBRef.current) deckBRef.current.playbackRate = speedB;
-                                    }
-                                }}
-                                className="mt-3 w-full py-2 bg-purple-600 hover:bg-purple-700 rounded text-xs font-bold"
-                            >
-                                SYNC
-                            </button>
-                        </div>
-                    </div>
-
-                    {renderDeck(deckB, setDeckB, 'B', deckBRef, false)}
-                </div>
-            </div>
-        );
-    };
-
-    useEffect(() => {
-        if (selectedAudio && selectedAudio.path && activeMode === 'analysis') {
-            analyzeAudio(selectedAudio.path);
-        }
-    }, [selectedAudio?.path, activeMode, analyzeAudio]);
-
-    const renderAnalysis = () => {
-        return (
-            <div className="flex-1 flex flex-col overflow-hidden">
-                <div className="h-12 border-b theme-border flex items-center px-4 gap-2 theme-bg-secondary">
-                    {(['waveform', 'spectrum', 'spectrogram'] as const).map(mode => (
-                        <button
-                            key={mode}
-                            onClick={() => setAnalysisMode(mode)}
-                            className={`px-3 py-1.5 rounded text-sm capitalize ${
-                                analysisMode === mode
-                                    ? 'bg-purple-600 text-white'
-                                    : 'theme-bg-tertiary theme-hover theme-text-secondary'
-                            }`}
-                        >
-                            {mode}
-                        </button>
-                    ))}
-                    <div className="flex-1"/>
-                    {selectedAudio && (
-                        <button
-                            onClick={() => analyzeAudio(selectedAudio.path)}
-                            className="px-3 py-1.5 theme-bg-tertiary theme-hover rounded text-sm flex items-center gap-1"
-                        >
-                            <RefreshCw size={14}/> Refresh
-                        </button>
-                    )}
-                </div>
-
-                <div className="flex-1 p-4">
-                    <div className="w-full h-full theme-bg-primary rounded-lg flex items-center justify-center overflow-hidden">
-                        {selectedAudio ? (
-                            <div className="w-full h-full p-4 flex flex-col">
-                                {analysisMode === 'waveform' && (
-                                    <div className="flex-1 flex items-center">
-                                        <div className="w-full h-48 flex items-center justify-center">
-                                            <svg className="w-full h-full" viewBox="0 0 500 100" preserveAspectRatio="none">
-                                                <line x1="0" y1="50" x2="500" y2="50" stroke="#4B5563" strokeWidth="0.5"/>
-                                                <path
-                                                    d={analysisWaveformData.length > 0
-                                                        ? `M 0,50 ${analysisWaveformData.map((v, i) =>
-                                                            `L ${(i / analysisWaveformData.length) * 500},${50 - v * 200}`
-                                                        ).join(' ')}`
-                                                        : 'M 0,50 L 500,50'
-                                                    }
-                                                    fill="none"
-                                                    stroke="#8B5CF6"
-                                                    strokeWidth="1"
-                                                />
-                                                <path
-                                                    d={analysisWaveformData.length > 0
-                                                        ? `M 0,50 ${analysisWaveformData.map((v, i) =>
-                                                            `L ${(i / analysisWaveformData.length) * 500},${50 + v * 200}`
-                                                        ).join(' ')}`
-                                                        : 'M 0,50 L 500,50'
-                                                    }
-                                                    fill="none"
-                                                    stroke="#8B5CF6"
-                                                    strokeWidth="1"
-                                                    opacity="0.5"
-                                                />
-                                            </svg>
-                                        </div>
-                                    </div>
-                                )}
-                                {analysisMode === 'spectrum' && (
-                                    <div className="flex-1 flex items-end justify-center gap-1 pb-4">
-                                        {(analysisFrequencyData ? Array.from(analysisFrequencyData).slice(0, 64) : Array(64).fill(0)).map((v, i) => (
-                                            <div
-                                                key={i}
-                                                className="flex-1 max-w-4 bg-gradient-to-t from-purple-600 via-pink-500 to-orange-400 rounded-t transition-all duration-75"
-                                                style={{ height: `${(v / 255) * 100}%`, minHeight: '2px' }}
-                                            />
-                                        ))}
-                                    </div>
-                                )}
-                                {analysisMode === 'spectrogram' && (
-                                    <div className="flex-1 overflow-hidden rounded">
-                                        <div className="w-full h-full grid grid-rows-32 gap-px">
-                                            {Array.from({ length: 32 }).map((_, rowIdx) => (
-                                                <div key={rowIdx} className="flex gap-px">
-                                                    {Array.from({ length: 100 }).map((_, colIdx) => {
-                                                        const intensity = analysisWaveformData[Math.floor(colIdx * analysisWaveformData.length / 100)] || 0;
-                                                        const freq = 1 - rowIdx / 32;
-                                                        const value = Math.abs(intensity) * freq * 255;
-                                                        return (
-                                                            <div
-                                                                key={colIdx}
-                                                                className="flex-1"
-                                                                style={{
-                                                                    backgroundColor: `rgb(${value * 0.8}, ${value * 0.3}, ${value})`
-                                                                }}
-                                                            />
-                                                        );
-                                                    })}
-                                                </div>
-                                            ))}
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-                        ) : (
-                            <div className="text-center">
-                                <Activity size={64} className="mx-auto theme-text-muted mb-4"/>
-                                <p className="theme-text-muted">Select an audio file to analyze</p>
-                            </div>
-                        )}
-                    </div>
-                </div>
-
-                {selectedAudio && (
-                    <div className="h-32 border-t theme-border p-4 theme-bg-secondary">
-                        <div className="grid grid-cols-5 gap-4">
-                            <div>
-                                <p className="text-xs theme-text-muted">Duration</p>
-                                <p className="text-lg font-mono">{formatTime(analysisAudioBuffer?.duration || selectedAudio.duration || 0)}</p>
-                            </div>
-                            <div>
-                                <p className="text-xs theme-text-muted">Sample Rate</p>
-                                <p className="text-lg font-mono">{analysisAudioBuffer ? `${(analysisAudioBuffer.sampleRate / 1000).toFixed(1)} kHz` : '---'}</p>
-                            </div>
-                            <div>
-                                <p className="text-xs theme-text-muted">Channels</p>
-                                <p className="text-lg font-mono">{analysisAudioBuffer?.numberOfChannels || '---'}</p>
-                            </div>
-                            <div>
-                                <p className="text-xs theme-text-muted">BPM (est.)</p>
-                                <p className="text-lg font-mono">{selectedAudio.bpm || '---'}</p>
-                            </div>
-                            <div>
-                                <p className="text-xs theme-text-muted">Key (est.)</p>
-                                <p className="text-lg font-mono">{selectedAudio.key || '---'}</p>
-                            </div>
-                        </div>
-                    </div>
-                )}
-            </div>
-        );
-    };
-
-    const renderNotation = () => {
-        const pianoKeys = Array.from({ length: 88 }, (_, i) => i + 21);
-        const guitarStrings = ['E', 'B', 'G', 'D', 'A', 'E'];
-        const measures = notationMeasures;
-        const beatsPerMeasure = notationTimeSignature[0];
-        const totalBeats = measures * beatsPerMeasure;
-
-        const visibleKeys = pianoKeys; // Full 88 keys
-        const noteHeight = 14;
-        const beatWidth = 40 * notationZoom;
-
-        const handlePianoRollMouseDown = (e: React.MouseEvent, noteIdx: number, type: 'move' | 'resize') => {
-            e.stopPropagation();
-            e.preventDefault();
-            pushNotationUndo();
-            setPianoRollDrag({
-                type,
-                noteIdx,
-                startX: e.clientX,
-                startY: e.clientY,
-                origNote: { ...pianoNotes[noteIdx] },
-            });
-        };
-
-        const handlePianoRollMouseMove = (e: React.MouseEvent) => {
-            if (!pianoRollDrag) return;
-            const dx = e.clientX - pianoRollDrag.startX;
-            const dy = e.clientY - pianoRollDrag.startY;
-            const { type, noteIdx, origNote } = pianoRollDrag;
-
-            if (type === 'resize') {
-                const durationDelta = dx / beatWidth;
-                const newDuration = Math.max(0.125, origNote.duration + durationDelta);
-                const quantized = Math.round(newDuration * 4) / 4;
-                setPianoNotes(prev => prev.map((n, i) => i === noteIdx ? { ...n, duration: Math.max(0.125, quantized) } : n));
-            } else {
-                const beatDelta = Math.round((dx / beatWidth) * 4) / 4;
-                const noteDelta = -Math.round(dy / noteHeight);
-                setPianoNotes(prev => prev.map((n, i) => i === noteIdx ? {
-                    ...n,
-                    start: Math.max(0, origNote.start + beatDelta),
-                    note: Math.max(21, Math.min(108, origNote.note + noteDelta)),
-                } : n));
-            }
-        };
-
-        const handlePianoRollMouseUp = () => {
-            setPianoRollDrag(null);
-        };
-
-        const renderPianoRoll = () => (
-            <div
-                className="flex-1 flex overflow-hidden"
-                style={{ background: '#121218' }}
-                onMouseMove={handlePianoRollMouseMove}
-                onMouseUp={handlePianoRollMouseUp}
-                onMouseLeave={handlePianoRollMouseUp}
-            >
-                {/* Piano keyboard sidebar */}
-                <div className="flex flex-col overflow-y-auto overflow-x-hidden" ref={pianoRollScrollRef}
-                    style={{ scrollbarWidth: 'none', width: '52px', background: '#0d0d12' }}
-                    onScroll={(e) => {
-                        const gridEl = e.currentTarget.nextElementSibling as HTMLElement;
-                        if (gridEl) gridEl.scrollTop = e.currentTarget.scrollTop;
-                    }}
-                >
-                    {[...visibleKeys].reverse().map(note => {
-                        const isBlack = [1, 3, 6, 8, 10].includes(note % 12);
-                        const isC = note % 12 === 0;
-                        const isE = note % 12 === 4;
-                        return (
-                            <div
-                                key={note}
-                                onClick={() => playNote(note)}
-                                className="shrink-0 cursor-pointer flex items-center justify-end pr-1"
-                                style={{
-                                    height: `${noteHeight}px`,
-                                    background: isBlack
-                                        ? 'linear-gradient(90deg, #1a1a24, #15151e)'
-                                        : isC ? '#2a2a38' : '#1e1e2a',
-                                    borderBottom: isC ? '1px solid rgba(99,102,241,0.25)' : isE ? '1px solid rgba(255,255,255,0.04)' : '1px solid rgba(255,255,255,0.02)',
-                                    color: isC ? 'rgba(165,180,252,0.9)' : isBlack ? 'rgba(255,255,255,0.2)' : 'rgba(255,255,255,0.35)',
-                                    fontSize: '8px',
-                                    fontFamily: "'SF Mono', 'Fira Code', monospace",
-                                    fontWeight: isC ? 700 : 400,
-                                    letterSpacing: '0.5px',
-                                }}
-                            >
-                                {isC ? noteToName(note) : note % 12 === 5 ? 'F' : ''}
-                            </div>
-                        );
-                    })}
-                </div>
-
-                {/* Grid area */}
-                <div className="flex-1 overflow-auto" ref={pianoRollGridRef}
-                    style={{ scrollbarWidth: 'thin', scrollbarColor: '#333 #1a1a1a' }}
-                    onScroll={(e) => {
-                        if (pianoRollScrollRef.current) pianoRollScrollRef.current.scrollTop = e.currentTarget.scrollTop;
-                    }}
-                >
-                    <div
-                        className="relative"
-                        style={{
-                            width: `${totalBeats * beatWidth}px`,
-                            minWidth: '100%',
-                            height: `${visibleKeys.length * noteHeight}px`,
-                        }}
-                        onClick={(e) => {
-                            if (pianoRollDrag) return;
-                            const rect = e.currentTarget.getBoundingClientRect();
-                            const x = (e.clientX - rect.left + (e.currentTarget.parentElement?.scrollLeft || 0));
-                            const y = (e.clientY - rect.top + (e.currentTarget.parentElement?.scrollTop || 0));
-                            const beat = Math.floor((x / beatWidth) * 4) / 4;
-                            const rowIdx = Math.floor(y / noteHeight);
-                            const note = visibleKeys[visibleKeys.length - 1 - rowIdx];
-                            if (note >= 21 && note <= 108) {
-                                addPianoNote(note, beat, inputNoteDuration, 0.8);
-                                playNote(note);
-                            }
-                        }}
-                    >
-                        {/* Row backgrounds */}
-                        {visibleKeys.map((note, idx) => {
-                            const rowIdx = visibleKeys.length - 1 - idx;
-                            const isBlack = [1, 3, 6, 8, 10].includes(note % 12);
-                            const isC = note % 12 === 0;
-                            return (
-                                <div
-                                    key={note}
-                                    className="absolute left-0 right-0"
-                                    style={{
-                                        top: `${rowIdx * noteHeight}px`,
-                                        height: `${noteHeight}px`,
-                                        backgroundColor: isBlack ? 'rgba(0,0,0,0.3)' : 'rgba(30,30,45,0.15)',
-                                        borderBottom: isC ? '1px solid rgba(99,102,241,0.15)' : '1px solid rgba(255,255,255,0.018)',
-                                    }}
-                                />
-                            );
-                        })}
-
-                        {/* Beat/measure lines */}
-                        {Array.from({ length: totalBeats }).map((_, beat) => {
-                            const isMeasure = beat % beatsPerMeasure === 0;
-                            const isHalf = beat % (beatsPerMeasure / 2) === 0 && !isMeasure;
-                            return (
-                                <div
-                                    key={beat}
-                                    className="absolute top-0 bottom-0"
-                                    style={{
-                                        left: `${beat * beatWidth}px`,
-                                        width: '1px',
-                                        backgroundColor: isMeasure ? 'rgba(99,102,241,0.3)' : isHalf ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.025)',
-                                    }}
-                                />
-                            );
-                        })}
-
-                        {/* Measure numbers */}
-                        {Array.from({ length: Math.ceil(totalBeats / beatsPerMeasure) }).map((_, m) => (
-                            <div
-                                key={m}
-                                className="absolute pointer-events-none select-none"
-                                style={{
-                                    left: `${m * beatsPerMeasure * beatWidth + 4}px`,
-                                    top: '3px',
-                                    fontSize: '9px',
-                                    color: 'rgba(99,102,241,0.45)',
-                                    fontWeight: 700,
-                                    fontFamily: "'SF Mono', 'Fira Code', monospace",
-                                    letterSpacing: '0.5px',
-                                }}
-                            >
-                                {m + 1}
-                            </div>
-                        ))}
-
-                        {/* Notes */}
-                        {pianoNotes.map((note, idx) => {
-                            const keyIdx = visibleKeys.indexOf(note.note);
-                            if (keyIdx === -1) return null;
-                            const rowIdx = visibleKeys.length - 1 - keyIdx;
-                            const noteW = Math.max(note.duration * beatWidth, 6);
-                            const isSelected = selectedNotes.has(idx);
-                            const hue = (note.note % 12) * 30;
-                            return (
-                                <div
-                                    key={idx}
-                                    className="absolute cursor-grab group"
-                                    style={{
-                                        top: `${rowIdx * noteHeight + 1}px`,
-                                        left: `${note.start * beatWidth}px`,
-                                        width: `${noteW}px`,
-                                        height: `${noteHeight - 2}px`,
-                                        borderRadius: '2px',
-                                        background: isSelected
-                                            ? 'linear-gradient(180deg, #fbbf24, #f59e0b)'
-                                            : `linear-gradient(180deg, hsla(${hue},75%,60%,${0.7 + note.velocity * 0.3}), hsla(${hue},65%,42%,${0.65 + note.velocity * 0.35}))`,
-                                        border: isSelected ? '1px solid #fcd34d' : `1px solid hsla(${hue},60%,70%,0.3)`,
-                                        boxShadow: isSelected
-                                            ? '0 0 10px rgba(251,191,36,0.5), inset 0 1px 0 rgba(255,255,255,0.2)'
-                                            : `0 1px 2px rgba(0,0,0,0.4), inset 0 1px 0 hsla(${hue},60%,80%,0.15)`,
-                                        zIndex: isSelected ? 10 : 1,
-                                    }}
-                                    onClick={(e) => {
-                                        e.stopPropagation();
-                                        setSelectedNotes(prev => {
-                                            const next = new Set(prev);
-                                            if (e.shiftKey) {
-                                                if (next.has(idx)) next.delete(idx); else next.add(idx);
-                                            } else {
-                                                if (next.has(idx) && next.size === 1) next.delete(idx);
-                                                else { next.clear(); next.add(idx); }
-                                            }
-                                            return next;
-                                        });
-                                    }}
-                                    onMouseDown={(e) => { if (e.button === 0) handlePianoRollMouseDown(e, idx, 'move'); }}
-                                    title={`${noteToName(note.note)} | Beat ${note.start} | Dur ${note.duration} | Vel ${Math.round(note.velocity * 100)}%`}
-                                >
-                                    <span className="pointer-events-none select-none pl-0.5" style={{
-                                        fontSize: '7px', color: 'rgba(255,255,255,0.9)', fontWeight: 600,
-                                        fontFamily: "'SF Mono', 'Fira Code', monospace",
-                                        textShadow: '0 1px 1px rgba(0,0,0,0.4)',
-                                    }}>
-                                        {noteW > 30 ? noteToName(note.note) : ''}
-                                    </span>
-                                    {/* Velocity bar at bottom */}
-                                    <div className="absolute bottom-0 left-0 pointer-events-none" style={{
-                                        height: '2px', borderRadius: '0 0 2px 2px',
-                                        width: `${note.velocity * 100}%`,
-                                        background: isSelected ? 'rgba(255,255,255,0.5)' : `hsla(${hue},80%,75%,0.5)`,
-                                    }}/>
-                                    {/* Resize handle */}
-                                    <div
-                                        className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize opacity-0 group-hover:opacity-100"
-                                        style={{ background: 'rgba(255,255,255,0.35)', borderRadius: '0 2px 2px 0' }}
-                                        onMouseDown={(e) => { e.stopPropagation(); handlePianoRollMouseDown(e, idx, 'resize'); }}
-                                    />
-                                </div>
-                            );
-                        })}
-
-                        {/* Playhead */}
-                        {(isNotationPlaying || notationPlayhead > 0) && (
-                            <div
-                                className="absolute top-0 pointer-events-none z-30"
-                                style={{ left: `${notationPlayhead * beatWidth}px`, height: `${visibleKeys.length * noteHeight}px` }}
-                            >
-                                <div className="absolute top-0 bottom-0" style={{
-                                    left: '-6px', width: '13px',
-                                    background: 'linear-gradient(90deg, transparent, rgba(239,68,68,0.08), rgba(239,68,68,0.12), rgba(239,68,68,0.08), transparent)',
-                                }}/>
-                                <div style={{
-                                    position: 'absolute', top: '-2px', left: '-5px',
-                                    width: 0, height: 0,
-                                    borderLeft: '5px solid transparent', borderRight: '5px solid transparent',
-                                    borderTop: '8px solid #ef4444',
-                                    filter: 'drop-shadow(0 0 3px rgba(239,68,68,0.8))',
-                                }}/>
-                                <div style={{
-                                    width: '2px', height: '100%',
-                                    background: 'linear-gradient(180deg, #ef4444, #dc2626)',
-                                    transform: 'translateX(-1px)',
-                                    boxShadow: '0 0 8px rgba(239,68,68,0.5), 0 0 2px rgba(239,68,68,0.8)',
-                                }}/>
-                            </div>
-                        )}
-
-                        {/* Input cursor */}
-                        {!isNotationPlaying && (
-                            <div
-                                className="absolute top-0 bottom-0 pointer-events-none z-10"
-                                style={{
-                                    left: `${inputCursor * beatWidth}px`,
-                                    width: '1px',
-                                    background: 'rgba(52,211,153,0.4)',
-                                    boxShadow: '0 0 6px rgba(52,211,153,0.2)',
-                                }}
-                            />
-                        )}
-                    </div>
-                </div>
-            </div>
-        );
-
-        const renderSheetMusic = () => {
-
-            const midiToVexPitch = (midi: number): string => {
-                const names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
-                const octave = Math.floor(midi / 12) - 1;
-                const name = names[midi % 12];
-                return `${name}/${octave}`;
-            };
-
-            const quantizeDuration = (dur: number): string => {
-                if (dur >= 3.5) return 'w';
-                if (dur >= 1.75) return 'h';
-                if (dur >= 0.875) return 'q';
-                if (dur >= 0.4375) return '8';
-                if (dur >= 0.21875) return '16';
-                return '32';
-            };
-
-            const durationBeats = (d: string): number => {
-                const map: Record<string, number> = { 'w': 4, 'h': 2, 'q': 1, '8': 0.5, '16': 0.25, '32': 0.125 };
-                return map[d] || 1;
-            };
-
-            // Build the effective list of "render tracks". Multi-track imports use notationTracks directly.
-            // Single-track + 'grand' clef synthesizes a treble+bass split from one source by midi pitch.
-            type RenderTrack = { name: string; clef: 'treble' | 'bass'; notes: NotationNote[] };
-            let renderTracks: RenderTrack[];
-            if (notationTracks.length === 1 && notationClef === 'grand') {
-                const allNotes = notationTracks[0].notes;
-                renderTracks = [
-                    { name: notationTracks[0].name, clef: 'treble', notes: allNotes.filter(n => n.note >= 60) },
-                    { name: notationTracks[0].name, clef: 'bass', notes: allNotes.filter(n => n.note < 60) },
-                ];
-            } else {
-                renderTracks = notationTracks.map(t => ({ name: t.name, clef: t.clef, notes: t.notes }));
-            }
-
-            // Per-track per-measure note grouping
-            const groupedByTrack: Array<Array<NotationNote[]>> = renderTracks.map(track => {
-                const out: NotationNote[][] = [];
-                for (let m = 0; m < measures; m++) {
-                    const ms = m * beatsPerMeasure;
-                    const me = ms + beatsPerMeasure;
-                    out.push(track.notes.filter(n => n.start >= ms && n.start < me));
-                }
-                return out;
-            });
-
-            const renderVexFlow = (container: HTMLDivElement | null) => {
-                if (!container) return;
-                // Skip re-render if content hasn't changed (prevents 60fps VexFlow rebuilds during playback)
-                const tracksKey = renderTracks.map(t =>
-                    `${t.name}:${t.clef}:${t.notes.map(n => `${n.note}|${n.start}|${n.duration}`).join(',')}`
-                ).join('||');
-                const contentKey = `${tracksKey}|${notationKeySignature}|${notationTimeSignature.join('/')}|${measures}|${activeTrackIdx}`;
-                if (container.dataset.vfKey === contentKey) return;
-                container.dataset.vfKey = contentKey;
-                container.innerHTML = '';
-                staveLayoutRef.current = [];
-
-                const measuresPerLine = 4;
-                const staveStartX = 50;
-                const pageWidth = 1100;
-                const staveWidth = Math.floor((pageWidth - staveStartX - 30) / measuresPerLine);
-                const staveSpacing = 90; // vertical px between staves within a line
-                const linePadding = 40;
-                const numTracks = renderTracks.length;
-                const lineHeight = numTracks * staveSpacing + linePadding;
-                const totalLines = Math.ceil(measures / measuresPerLine);
-                const totalHeight = Math.max(totalLines * lineHeight + 80, 500);
-
-                const renderer = new VFRenderer(container, VFRenderer.Backends.SVG);
-                renderer.resize(pageWidth, totalHeight);
-                const context = renderer.getContext();
-                context.setFont('Arial', 10);
-
-                const svgEl = container.querySelector('svg');
-                if (svgEl) {
-                    svgEl.style.overflow = 'visible';
-                    const style = document.createElementNS('http://www.w3.org/2000/svg', 'style');
-                    style.textContent = `
-                        .vf-stave .vf-stave-section rect { stroke-width: 0.8; }
-                        line.vf-barline { stroke-width: 1.2 !important; }
-                    `;
-                    svgEl.prepend(style);
-                }
-
-                for (let line = 0; line < totalLines; line++) {
-                    const lineY = line * lineHeight + 30;
-
-                    for (let mInLine = 0; mInLine < measuresPerLine; mInLine++) {
-                        const mIdx = line * measuresPerLine + mInLine;
-                        if (mIdx >= measures) break;
-
-                        const x = staveStartX + mInLine * staveWidth;
-                        const isFirstInLine = mInLine === 0;
-                        const isFirstMeasure = mIdx === 0;
-
-                        // Build one stave per track at this measure
-                        const stavesAtMeasure: Stave[] = [];
-                        renderTracks.forEach((track, tIdx) => {
-                            const sy = lineY + tIdx * staveSpacing;
-                            const stave = new Stave(x, sy, staveWidth);
-                            if (isFirstInLine) stave.addClef(track.clef);
-                            if (isFirstMeasure) {
-                                stave.addTimeSignature(`${notationTimeSignature[0]}/${notationTimeSignature[1]}`);
-                                if (notationKeySignature !== 'C') stave.addKeySignature(notationKeySignature);
-                            }
-                            // Measure number on the topmost stave only
-                            if (tIdx === 0 && (isFirstInLine || mIdx > 0)) {
-                                stave.setMeasure(mIdx + 1);
-                            }
-                            stave.setContext(context).draw();
-                            stavesAtMeasure.push(stave);
-
-                            // Track-name label (left of first measure of each line, on each stave)
-                            if (isFirstInLine && track.name) {
-                                try {
-                                    const ctx: any = context;
-                                    if (ctx.save) ctx.save();
-                                    ctx.setFont?.('Arial', 9, 'normal');
-                                    ctx.fillText?.(track.name, x - 46, sy + 30);
-                                    if (ctx.restore) ctx.restore();
-                                } catch {}
-                            }
-                        });
-
-                        // Brace + connector across all tracks on the first measure of each line
-                        if (isFirstInLine && stavesAtMeasure.length > 1) {
-                            const top = stavesAtMeasure[0];
-                            const bot = stavesAtMeasure[stavesAtMeasure.length - 1];
-                            try {
-                                new StaveConnector(top, bot).setType('singleLeft').setContext(context).draw();
-                                new StaveConnector(top, bot).setType('brace').setContext(context).draw();
-                            } catch {}
-                        }
-
-                        // Layout registration deferred until after voice rendering so we
-                        // can capture the actual first-note X (Formatter adds padding past getNoteStartX).
-
-                        // Render notes for each track's stave
-                        const fillRests = (out: StaveNote[], beatsFilled: number, clef: string) => {
-                            let remaining = beatsPerMeasure - beatsFilled;
-                            while (remaining > 0) {
-                                let restDur = 'qr', restBeats = 1;
-                                if (remaining >= 4) { restDur = 'wr'; restBeats = 4; }
-                                else if (remaining >= 2) { restDur = 'hr'; restBeats = 2; }
-                                else if (remaining >= 1) { restDur = 'qr'; restBeats = 1; }
-                                else if (remaining >= 0.5) { restDur = '8r'; restBeats = 0.5; }
-                                else { restDur = '16r'; restBeats = 0.25; }
-                                try {
-                                    out.push(new StaveNote({
-                                        clef,
-                                        keys: [clef === 'bass' ? 'D/3' : 'B/4'],
-                                        duration: restDur,
-                                    }));
-                                } catch { break; }
-                                remaining -= restBeats;
-                            }
-                        };
-
-                        renderTracks.forEach((track, tIdx) => {
-                            const stave = stavesAtMeasure[tIdx];
-                            const measureNotes = groupedByTrack[tIdx][mIdx] || [];
-                            const clef = track.clef;
-                            const restPitch = clef === 'bass' ? 'D/3' : 'B/4';
-
-                            const out: StaveNote[] = [];
-                            let beatsFilled = 0;
-
-                            if (measureNotes.length === 0) {
-                                out.push(new StaveNote({ clef, keys: [restPitch], duration: 'wr' }));
-                            } else {
-                                const sorted = [...measureNotes].sort((a, b) => a.start - b.start || a.note - b.note);
-
-                                // Group notes that start at the same beat into a chord
-                                const groups: NotationNote[][] = [];
-                                for (const n of sorted) {
-                                    const last = groups[groups.length - 1];
-                                    if (last && Math.abs(last[0].start - n.start) < 0.01) last.push(n);
-                                    else groups.push([n]);
-                                }
-
-                                for (const group of groups) {
-                                    const maxDur = Math.max(...group.map(n => n.duration));
-                                    const vexDuration = quantizeDuration(maxDur);
-                                    const beats = durationBeats(vexDuration);
-                                    const keys = group.map(n => midiToVexPitch(n.note));
-                                    try {
-                                        const sn = new StaveNote({ clef, keys, duration: vexDuration });
-                                        keys.forEach((pitch, idx) => {
-                                            const noteName = pitch.split('/')[0];
-                                            if (noteName.includes('#')) sn.addModifier(new Accidental('#'), idx);
-                                            else if (noteName.includes('b')) sn.addModifier(new Accidental('b'), idx);
-                                        });
-                                        out.push(sn);
-                                        beatsFilled += beats;
-                                    } catch {}
-                                }
-
-                                if (out.length === 0) {
-                                    out.push(new StaveNote({ clef, keys: [restPitch], duration: 'wr' }));
-                                } else {
-                                    fillRests(out, beatsFilled, clef);
-                                }
-                            }
-
-                            try {
-                                const voice = new Voice({ numBeats: beatsPerMeasure, beatValue: notationTimeSignature[1] })
-                                    .setMode(Voice.Mode.SOFT);
-                                voice.addTickables(out);
-                                new Formatter().joinVoices([voice])
-                                    .format([voice], staveWidth - (isFirstInLine ? 60 : 20));
-                                voice.draw(context, stave);
-
-                                const beamable = out.filter(n => {
-                                    const d = n.getDuration();
-                                    return !d.includes('r') && (d === '8' || d === '16' || d === '32');
-                                });
-                                if (beamable.length >= 2) {
-                                    Beam.generateBeams(beamable).forEach(b => b.setContext(context).draw());
-                                }
-                            } catch {}
-
-                            // Register layout entry. Anchor playhead start at the stave's note region
-                            // (consistent per-measure) and end at the right barline — no jumps across measure transitions.
-                            try {
-                                const noteStartX = (stave as any).getNoteStartX?.() ?? x;
-                                const noteEndX = x + staveWidth; // right barline
-                                staveLayoutRef.current.push({
-                                    x, y: lineY + tIdx * staveSpacing, width: staveWidth, measureIdx: mIdx,
-                                    clef: track.clef,
-                                    topLineY: stave.getYForLine(0),
-                                    bottomLineY: stave.getYForLine(4),
-                                    trackIdx: tIdx,
-                                    isActive: tIdx === activeTrackIdx,
-                                    noteStartX,
-                                    noteEndX,
-                                });
-                            } catch {}
-                        });
-                    }
-                }
-            };
-
-            const sheetNoteNames = ['C', 'D', 'E', 'F', 'G', 'A', 'B'];
-            const sheetNoteNamesFull = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
-
-            const addSheetNote = (noteName: string, octave: number) => {
-                const noteIdx = sheetNoteNamesFull.indexOf(noteName);
-                if (noteIdx === -1) return;
-                const midi = (octave + 1) * 12 + noteIdx;
-                addPianoNote(midi, inputCursor, inputNoteDuration, 0.8);
-                playNote(midi);
-            };
-
-            const addSheetRest = () => {
-
-                setInputCursor(prev => prev + inputNoteDuration);
-            };
-
-            const snapToStaff = (container: HTMLDivElement, clientX: number, clientY: number) => {
-                if (staveLayoutRef.current.length === 0) return null;
-                const rect = container.getBoundingClientRect();
-                const svgX = (clientX - rect.left) / notationZoom;
-                const svgY = (clientY - rect.top) / notationZoom;
-
-                let closestStave: typeof staveLayoutRef.current[0] | null = null;
-                let minDist = Infinity;
-                for (const stave of staveLayoutRef.current) {
-                    const margin = 25;
-                    if (svgX >= stave.x && svgX <= stave.x + stave.width &&
-                        svgY >= stave.topLineY - margin && svgY <= stave.bottomLineY + margin) {
-                        const centerY = (stave.topLineY + stave.bottomLineY) / 2;
-                        const dist = Math.abs(svgY - centerY);
-                        if (dist < minDist) { minDist = dist; closestStave = stave; }
-                    }
-                }
-                if (!closestStave) return null;
-
-                const lineSpacing = (closestStave.bottomLineY - closestStave.topLineY) / 4;
-                const halfLine = lineSpacing / 2;
-                const staffPos = Math.round((svgY - closestStave.topLineY) / halfLine);
-                const snappedSvgY = closestStave.topLineY + staffPos * halfLine;
-                const midi = staffPositionToMidi(staffPos, closestStave.clef);
-
-                const xRatio = (svgX - closestStave.x) / closestStave.width;
-                const beatInMeasure = Math.max(0, Math.min(beatsPerMeasure - 0.25, xRatio * beatsPerMeasure));
-                const quantStep = Math.min(inputNoteDuration, 0.5);
-                const quantizedBeat = Math.round(beatInMeasure / quantStep) * quantStep;
-                const snappedSvgX = closestStave.x + (quantizedBeat / beatsPerMeasure) * closestStave.width;
-                const globalBeat = closestStave.measureIdx * beatsPerMeasure + quantizedBeat;
-
-                const screenX = rect.left + snappedSvgX * notationZoom;
-                const screenY = rect.top + snappedSvgY * notationZoom;
-
-                return { midi, globalBeat, screenX, screenY, staffPos, clef: closestStave.clef };
-            };
-
-            const findNoteAt = (midi: number, beat: number): number | null => {
-                for (let i = 0; i < pianoNotes.length; i++) {
-                    const n = pianoNotes[i];
-                    if (Math.abs(n.start - beat) < 0.3 && Math.abs(n.note - midi) <= 1) return i;
-                }
-                return null;
-            };
-
-            const positionGhost = (scrollContainer: HTMLElement, snap: NonNullable<ReturnType<typeof snapToStaff>>, dragging: boolean) => {
-                const ghost = ghostNoteRef.current;
-                const label = ghostLabelRef.current;
-                if (!ghost || !label) return;
-
-                const scrollRect = scrollContainer.getBoundingClientRect();
-                const gx = snap.screenX - scrollRect.left + scrollContainer.scrollLeft;
-                const gy = snap.screenY - scrollRect.top + scrollContainer.scrollTop;
-
-                ghost.style.display = 'block';
-                ghost.style.left = `${gx - 6}px`;
-                ghost.style.top = `${gy - 6}px`;
-                ghost.style.background = dragging ? 'rgba(234, 88, 12, 0.6)' : 'rgba(147, 51, 234, 0.5)';
-                ghost.style.borderColor = dragging ? 'rgba(234, 88, 12, 0.9)' : 'rgba(147, 51, 234, 0.8)';
-                ghost.style.width = dragging ? '14px' : '12px';
-                ghost.style.height = dragging ? '14px' : '12px';
-
-                label.style.display = 'block';
-                label.style.left = `${gx + 12}px`;
-                label.style.top = `${gy - 10}px`;
-                label.style.color = dragging ? 'rgba(234, 88, 12, 0.9)' : 'rgba(147, 51, 234, 0.9)';
-                label.textContent = noteToName(snap.midi);
-            };
-
-            const hideGhost = () => {
-                if (ghostNoteRef.current) ghostNoteRef.current.style.display = 'none';
-                if (ghostLabelRef.current) ghostLabelRef.current.style.display = 'none';
-            };
-
-            const handleStaffMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-                const vfContainer = e.currentTarget.querySelector('div[style]') as HTMLDivElement;
-                if (!vfContainer) return;
-                const snap = snapToStaff(vfContainer, e.clientX, e.clientY);
-                if (!snap) { hideGhost(); return; }
-
-                const dragging = dragNoteRef.current !== null;
-
-                if (dragging) {
-
-                    positionGhost(e.currentTarget, snap, true);
-                    e.currentTarget.style.cursor = 'grabbing';
-                } else {
-
-                    const hoverIdx = findNoteAt(snap.midi, snap.globalBeat);
-                    if (hoverIdx !== null) {
-                        e.currentTarget.style.cursor = 'grab';
-                    } else {
-                        e.currentTarget.style.cursor = 'crosshair';
-                    }
-                    positionGhost(e.currentTarget, snap, false);
-                }
-            };
-
-            const handleStaffMouseLeave = () => {
-                hideGhost();
-                dragNoteRef.current = null;
-            };
-
-            const handleStaffMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
-                if (e.button !== 0) return;
-                const vfContainer = e.currentTarget.querySelector('div[style]') as HTMLDivElement;
-                if (!vfContainer) return;
-                const snap = snapToStaff(vfContainer, e.clientX, e.clientY);
-                if (!snap) return;
-
-                const noteIdx = findNoteAt(snap.midi, snap.globalBeat);
-                if (noteIdx !== null) {
-                    e.preventDefault();
-                    dragNoteRef.current = {
-                        idx: noteIdx,
-                        origMidi: pianoNotes[noteIdx].note,
-                        origBeat: pianoNotes[noteIdx].start,
-                    };
-                }
-            };
-
-            const handleStaffMouseUp = (e: React.MouseEvent<HTMLDivElement>) => {
-                const drag = dragNoteRef.current;
-                if (!drag) return;
-
-                const vfContainer = e.currentTarget.querySelector('div[style]') as HTMLDivElement;
-                if (!vfContainer) { dragNoteRef.current = null; return; }
-                const snap = snapToStaff(vfContainer, e.clientX, e.clientY);
-                dragNoteRef.current = null;
-                e.currentTarget.style.cursor = 'crosshair';
-
-                if (!snap) return;
-
-                if (snap.midi !== drag.origMidi || Math.abs(snap.globalBeat - drag.origBeat) > 0.01) {
-                    pushNotationUndo();
-                    setPianoNotes(prev => prev.map((n, i) =>
-                        i === drag.idx ? { ...n, note: snap.midi, start: snap.globalBeat } : n
-                    ));
-                    playNote(snap.midi);
-                }
-            };
-
-            const handleStaffDoubleClick = (e: React.MouseEvent<HTMLDivElement>) => {
-                if (dragNoteRef.current) return;
-                const vfContainer = e.currentTarget.querySelector('div[style]') as HTMLDivElement;
-                if (!vfContainer) return;
-                const snap = snapToStaff(vfContainer, e.clientX, e.clientY);
-                if (!snap) return;
-
-                if (findNoteAt(snap.midi, snap.globalBeat) !== null) return;
-                addPianoNote(snap.midi, snap.globalBeat, inputNoteDuration, 0.8);
-                playNote(snap.midi);
-            };
-
-            const handleStaffRightClick = (e: React.MouseEvent<HTMLDivElement>) => {
-                e.preventDefault();
-                e.stopPropagation();
-                const vfContainer = e.currentTarget.querySelector('div[style]') as HTMLDivElement;
-                if (!vfContainer || staveLayoutRef.current.length === 0) {
-                    setNoteContextMenu(null);
-                    return;
-                }
-
-                const rect = vfContainer.getBoundingClientRect();
-                const clickX = (e.clientX - rect.left) / notationZoom;
-                const clickY = (e.clientY - rect.top) / notationZoom;
-
-                let closestStave: typeof staveLayoutRef.current[0] | null = null;
-                for (const stave of staveLayoutRef.current) {
-                    const margin = 25;
-                    if (clickX >= stave.x && clickX <= stave.x + stave.width &&
-                        clickY >= stave.topLineY - margin && clickY <= stave.bottomLineY + margin) {
-                        closestStave = stave;
-                        break;
-                    }
-                }
-                if (!closestStave) { setNoteContextMenu(null); return; }
-
-                const xRatio = (clickX - closestStave.x) / closestStave.width;
-                const beatInMeasure = Math.max(0, xRatio * beatsPerMeasure);
-                const globalBeat = closestStave.measureIdx * beatsPerMeasure + beatInMeasure;
-
-                let nearestNoteIdx: number | null = null;
-                let minDist = 0.5;
-                pianoNotes.forEach((n, idx) => {
-                    const dist = Math.abs(n.start - globalBeat);
-                    if (dist < minDist) { minDist = dist; nearestNoteIdx = idx; }
-                });
-
-                setNoteContextMenu({
-                    x: e.clientX, y: e.clientY,
-                    noteIdx: nearestNoteIdx,
-                    beat: globalBeat,
-                    measureIdx: closestStave.measureIdx,
-                });
-            };
-
-            const durationOptions = [
-                { value: 4, label: '𝅝', title: 'Whole' },
-                { value: 2, label: '𝅗𝅥', title: 'Half' },
-                { value: 1, label: '♩', title: 'Quarter' },
-                { value: 0.5, label: '♪', title: 'Eighth' },
-                { value: 0.25, label: '𝅘𝅥𝅯', title: '16th' },
-            ];
-
-            return (
-                <div className="flex-1 flex flex-col overflow-hidden">
-                    {/* Sheet music input toolbar */}
-                    <div className="flex items-center gap-1 px-3 h-8 shrink-0 border-b theme-border theme-bg-secondary">
-                        <select value={notationKeySignature} onChange={(e) => setNotationKeySignature(e.target.value)}
-                            className="px-1.5 py-0.5 rounded text-xs theme-bg-tertiary theme-border border">
-                            {['C', 'G', 'D', 'A', 'E', 'B', 'F#', 'Cb', 'F', 'Bb', 'Eb', 'Ab', 'Db', 'Gb'].map(k => (
-                                <option key={k} value={k}>{k}</option>
-                            ))}
-                        </select>
-                        <select value={notationClef} onChange={(e) => setNotationClef(e.target.value as 'treble' | 'bass' | 'grand')}
-                            className="px-1.5 py-0.5 rounded text-xs theme-bg-tertiary theme-border border">
-                            <option value="treble">Treble</option>
-                            <option value="bass">Bass</option>
-                            <option value="grand">Grand</option>
-                        </select>
-
-                        <div className="w-px h-4 theme-bg-tertiary"/>
-
-                        {durationOptions.map(d => (
-                            <button key={d.value} onClick={() => setInputNoteDuration(d.value)} title={d.title}
-                                className={`w-6 h-6 flex items-center justify-center rounded text-sm border ${inputNoteDuration === d.value ? 'bg-purple-600 text-white border-purple-600' : 'theme-bg-tertiary theme-text-muted theme-border theme-hover'}`}>
-                                {d.label}
-                            </button>
-                        ))}
-
-                        <div className="w-px h-4 theme-bg-tertiary"/>
-
-                        <span className="text-[10px] font-medium theme-text-muted">Oct</span>
-                        <button onClick={() => setInputOctave(o => Math.max(1, o - 1))} className="w-5 h-5 flex items-center justify-center rounded text-xs theme-bg-tertiary theme-hover theme-border border">-</button>
-                        <span className="text-xs font-bold w-3 text-center">{inputOctave}</span>
-                        <button onClick={() => setInputOctave(o => Math.min(7, o + 1))} className="w-5 h-5 flex items-center justify-center rounded text-xs theme-bg-tertiary theme-hover theme-border border">+</button>
-
-                        <div className="w-px h-4 theme-bg-tertiary"/>
-
-                        {sheetNoteNames.map(name => (
-                            <React.Fragment key={name}>
-                                <button onClick={() => addSheetNote(name, inputOctave)}
-                                    className="h-6 w-6 rounded text-xs font-semibold theme-bg-tertiary theme-hover theme-border border">{name}</button>
-                                {name !== 'E' && name !== 'B' && (
-                                    <button onClick={() => addSheetNote(name + '#', inputOctave)}
-                                        className="h-5 w-5 rounded text-[9px] font-semibold -mx-0.5 bg-gray-600 text-gray-200 hover:bg-gray-500 border border-gray-500">{name}#</button>
-                                )}
-                            </React.Fragment>
-                        ))}
-                        <button onClick={addSheetRest} className="h-6 px-2 rounded text-xs font-medium theme-bg-tertiary theme-hover theme-border border" title="Rest">Rest</button>
-                    </div>
-
-                    {/* Track selector — visible when there are multiple tracks. Click a name to edit, M to mute. */}
-                    {notationTracks.length > 1 && (
-                        <div className="flex items-center gap-1.5 px-3 h-7 shrink-0 border-b theme-border theme-bg-secondary overflow-x-auto">
-                            <span className="text-[10px] font-medium theme-text-muted shrink-0">Tracks:</span>
-                            {notationTracks.map((t, i) => {
-                                const isMuted = notationMutedTracks.has(i);
-                                return (
-                                    <div key={t.id} className="flex items-center rounded border theme-border overflow-hidden shrink-0">
-                                        <button
-                                            onClick={() => setActiveTrackIdx(i)}
-                                            className={`px-2 py-0.5 text-[11px] whitespace-nowrap ${
-                                                i === activeTrackIdx
-                                                    ? 'bg-purple-600 text-white'
-                                                    : 'theme-bg-tertiary theme-text-muted theme-hover'
-                                            } ${isMuted ? 'opacity-50 line-through' : ''}`}
-                                            title={`Edit ${t.name} (${t.clef})`}
-                                        >
-                                            {t.name}
-                                        </button>
-                                        <button
-                                            onClick={() => setNotationMutedTracks(prev => {
-                                                const next = new Set(prev);
-                                                if (next.has(i)) next.delete(i); else next.add(i);
-                                                return next;
-                                            })}
-                                            className={`px-1.5 py-0.5 text-[10px] border-l theme-border ${
-                                                isMuted
-                                                    ? 'bg-red-600 text-white'
-                                                    : 'theme-bg-tertiary theme-text-muted theme-hover'
-                                            }`}
-                                            title={isMuted ? 'Unmute' : 'Mute'}
-                                        >
-                                            M
-                                        </button>
-                                    </div>
-                                );
-                            })}
-                        </div>
-                    )}
-
-                    <div
-                        className="flex-1 overflow-auto cursor-crosshair relative"
-                        ref={sheetMusicScrollRef}
-                        onMouseDown={handleStaffMouseDown}
-                        onMouseMove={handleStaffMouseMove}
-                        onMouseUp={handleStaffMouseUp}
-                        onMouseLeave={handleStaffMouseLeave}
-                        onDoubleClick={handleStaffDoubleClick}
-                        onContextMenu={handleStaffRightClick}
-                        onClick={() => setNoteContextMenu(null)}
-                        title="Double-click to place notes, drag to move"
-                        style={{ background: '#8b8b92', padding: '24px 16px' }}
-                    >
-                        <div style={{
-                            background: '#fff',
-                            margin: '0 auto',
-                            width: `${(1100 + 90) * notationZoom}px`,
-                            maxWidth: '100%',
-                            minHeight: `${Math.max((Math.max(Math.ceil(measures / 4) * (notationClef === 'grand' ? 240 : 150) + 80, 500)) * notationZoom + 100, 600)}px`,
-                            boxShadow: '0 1px 3px rgba(0,0,0,0.12), 0 0 0 1px rgba(0,0,0,0.04)',
-                            padding: '40px 45px 60px',
-                            position: 'relative',
-                        }}>
-                            {/* Editable title + composer header (classical score layout) */}
-                            <div style={{ marginBottom: '20px', textAlign: 'center', userSelect: 'text' }}>
-                                <input
-                                    type="text"
-                                    value={workTitle}
-                                    onChange={(e) => setWorkTitle(e.target.value)}
-                                    placeholder="Untitled"
-                                    style={{
-                                        width: '100%',
-                                        textAlign: 'center',
-                                        fontSize: '22px',
-                                        fontWeight: 600,
-                                        fontFamily: 'Georgia, "Times New Roman", serif',
-                                        color: '#111',
-                                        background: 'transparent',
-                                        border: 'none',
-                                        outline: 'none',
-                                        padding: '2px 0',
-                                    }}
-                                />
-                                <input
-                                    type="text"
-                                    value={composer}
-                                    onChange={(e) => setComposer(e.target.value)}
-                                    placeholder="Composer"
-                                    style={{
-                                        width: '100%',
-                                        textAlign: 'right',
-                                        fontSize: '13px',
-                                        fontStyle: 'italic',
-                                        fontFamily: 'Georgia, "Times New Roman", serif',
-                                        color: '#333',
-                                        background: 'transparent',
-                                        border: 'none',
-                                        outline: 'none',
-                                        padding: '2px 4px 0 0',
-                                    }}
-                                />
-                            </div>
-                            <div
-                                ref={renderVexFlow}
-                                style={{ transform: `scale(${notationZoom})`, transformOrigin: 'top left' }}
-                            />
-                        {/* Sheet music playhead — spans all tracks at the current measure.
-                            Positioning is mutated directly via ref in the rAF loop for sample-accurate sync. */}
-                        <div
-                            ref={sheetPlayheadRef}
-                            className="absolute pointer-events-none z-20"
-                            style={{
-                                display: (isNotationPlaying || notationPlayhead > 0) ? 'block' : 'none',
-                                left: '0px', top: '0px',
-                                width: '2.5px',
-                                height: '0px',
-                                background: 'rgba(59, 130, 246, 0.85)',
-                                boxShadow: '0 0 6px rgba(59,130,246,0.4)',
-                                borderRadius: '1px',
-                            }}
-                        >
-                            <div style={{
-                                position: 'absolute', top: '-6px', left: '-4.75px',
-                                width: 0, height: 0,
-                                borderLeft: '6px solid transparent', borderRight: '6px solid transparent',
-                                borderTop: '6px solid rgba(59, 130, 246, 0.9)',
-                            }}/>
-                        </div>
-                        <div
-                            ref={ghostNoteRef}
-                            className="absolute pointer-events-none"
-                            style={{
-                                display: 'none',
-                                width: 12, height: 12,
-                                borderRadius: '50%',
-                                background: 'rgba(99, 102, 241, 0.5)',
-                                border: '2px solid rgba(99, 102, 241, 0.8)',
-                                boxShadow: '0 0 6px rgba(99,102,241,0.3)',
-                            }}
-                        />
-                        <div
-                            ref={ghostLabelRef}
-                            className="absolute pointer-events-none text-xs font-bold"
-                            style={{
-                                display: 'none',
-                                color: 'rgba(99, 102, 241, 0.9)',
-                                textShadow: '0 0 3px white, 0 0 3px white',
-                                fontFamily: "'SF Mono', monospace",
-                            }}
-                        />
-                        </div>{/* close page div */}
-                    </div>
-
-                    {noteContextMenu && (
-                        <div
-                            className="fixed z-50 theme-bg-secondary border theme-border rounded-lg shadow-xl py-1 min-w-[180px]"
-                            style={{ left: noteContextMenu.x, top: noteContextMenu.y }}
-                            onClick={() => setNoteContextMenu(null)}
-                        >
-                            {noteContextMenu.noteIdx !== null ? (
-                                <>
-                                    <div className="px-3 py-1 text-xs theme-text-muted border-b theme-border">
-                                        {noteToName(pianoNotes[noteContextMenu.noteIdx].note)} - Beat {pianoNotes[noteContextMenu.noteIdx].start.toFixed(1)}
-                                    </div>
-                                    <button
-                                        className="w-full text-left px-3 py-1.5 text-sm theme-hover text-red-400"
-                                        onClick={() => {
-                                            setPianoNotes(prev => prev.filter((_, i) => i !== noteContextMenu.noteIdx));
-                                            setNoteContextMenu(null);
-                                        }}
-                                    >
-                                        Delete Note
-                                    </button>
-                                    <div className="border-t theme-border my-1"/>
-                                    <div className="px-3 py-1 text-xs theme-text-muted">Change Duration</div>
-                                    {[
-                                        { v: 4, l: 'Whole' }, { v: 2, l: 'Half' }, { v: 1, l: 'Quarter' },
-                                        { v: 0.5, l: 'Eighth' }, { v: 0.25, l: '16th' }
-                                    ].map(d => (
-                                        <button
-                                            key={d.v}
-                                            className={`w-full text-left px-3 py-1 text-sm theme-hover ${
-                                                pianoNotes[noteContextMenu.noteIdx!]?.duration === d.v ? 'text-purple-400' : 'theme-text-secondary'
-                                            }`}
-                                            onClick={() => {
-                                                const idx = noteContextMenu.noteIdx!;
-                                                setPianoNotes(prev => prev.map((n, i) => i === idx ? { ...n, duration: d.v } : n));
-                                                setNoteContextMenu(null);
-                                            }}
-                                        >
-                                            {d.l} {pianoNotes[noteContextMenu.noteIdx!]?.duration === d.v ? '  *' : ''}
-                                        </button>
-                                    ))}
-                                    <div className="border-t theme-border my-1"/>
-                                    <div className="px-3 py-1 text-xs theme-text-muted">Octave</div>
-                                    <div className="flex gap-1 px-3 py-1">
-                                        <button
-                                            className="px-2 py-0.5 theme-bg-tertiary rounded text-xs theme-hover"
-                                            onClick={() => {
-                                                const idx = noteContextMenu.noteIdx!;
-                                                setPianoNotes(prev => prev.map((n, i) => i === idx ? { ...n, note: Math.max(21, n.note - 12) } : n));
-                                                setNoteContextMenu(null);
-                                            }}
-                                        >Oct -</button>
-                                        <button
-                                            className="px-2 py-0.5 theme-bg-tertiary rounded text-xs theme-hover"
-                                            onClick={() => {
-                                                const idx = noteContextMenu.noteIdx!;
-                                                setPianoNotes(prev => prev.map((n, i) => i === idx ? { ...n, note: Math.min(108, n.note + 12) } : n));
-                                                setNoteContextMenu(null);
-                                            }}
-                                        >Oct +</button>
-                                    </div>
-                                    <div className="border-t theme-border my-1"/>
-                                    <div className="px-3 py-1 text-xs theme-text-muted">Velocity</div>
-                                    <div className="flex gap-1 px-3 py-1">
-                                        {[0.3, 0.5, 0.7, 0.9, 1.0].map(v => (
-                                            <button
-                                                key={v}
-                                                className={`px-2 py-0.5 rounded text-xs ${
-                                                    Math.abs((pianoNotes[noteContextMenu.noteIdx!]?.velocity || 0) - v) < 0.05
-                                                        ? 'bg-purple-600' : 'theme-bg-tertiary theme-hover'
-                                                }`}
-                                                onClick={() => {
-                                                    const idx = noteContextMenu.noteIdx!;
-                                                    setPianoNotes(prev => prev.map((n, i) => i === idx ? { ...n, velocity: v } : n));
-                                                    setNoteContextMenu(null);
-                                                }}
-                                            >
-                                                {v === 0.3 ? 'pp' : v === 0.5 ? 'mp' : v === 0.7 ? 'mf' : v === 0.9 ? 'f' : 'ff'}
-                                            </button>
-                                        ))}
-                                    </div>
-                                </>
-                            ) : (
-                                <>
-                                    <div className="px-3 py-1 text-xs theme-text-muted border-b theme-border">
-                                        Measure {noteContextMenu.measureIdx + 1}, Beat {(noteContextMenu.beat % beatsPerMeasure).toFixed(1)}
-                                    </div>
-                                    <button
-                                        className="w-full text-left px-3 py-1.5 text-sm theme-hover theme-text-secondary"
-                                        onClick={() => {
-                                            setInputCursor(noteContextMenu.beat);
-                                            setNoteContextMenu(null);
-                                        }}
-                                    >
-                                        Set Cursor Here
-                                    </button>
-                                    <button
-                                        className="w-full text-left px-3 py-1.5 text-sm theme-hover theme-text-secondary"
-                                        onClick={() => {
-                                            setInputCursor(noteContextMenu.beat + inputNoteDuration);
-                                            setNoteContextMenu(null);
-                                        }}
-                                    >
-                                        Add Rest Here
-                                    </button>
-                                    <div className="border-t theme-border my-1"/>
-                                    <button
-                                        className="w-full text-left px-3 py-1.5 text-sm theme-hover text-red-400"
-                                        onClick={() => {
-                                            const mStart = noteContextMenu.measureIdx * beatsPerMeasure;
-                                            const mEnd = mStart + beatsPerMeasure;
-                                            setPianoNotes(prev => prev.filter(n => n.start < mStart || n.start >= mEnd));
-                                            setNoteContextMenu(null);
-                                        }}
-                                    >
-                                        Clear Measure
-                                    </button>
-                                </>
-                            )}
-                        </div>
-                    )}
-                </div>
-            );
-        };
-
-        const renderGuitarTab = () => {
-            const tabBeatWidth = 36 * notationZoom;
-
-            const derivedTabNotes = pianoNotes.map(n => {
-                const tab = midiToTab(n.note);
-                return tab ? { ...tab, start: n.start, duration: n.duration } : null;
-            }).filter(Boolean) as Array<{ string: number; fret: number; start: number; duration: number }>;
-
-            const addTabNote = (stringIdx: number, fret: number, beat: number) => {
-                const midi = tabToMidi(stringIdx, fret);
-                addPianoNote(midi, beat, inputNoteDuration, 0.8);
-                playNote(midi);
-            };
-
-            const stringRowH = 28;
-
-            return (
-                <div className="flex-1 flex flex-col overflow-hidden" style={{ background: '#121218' }}>
-                    {/* Tab toolbar */}
-                    <div className="flex items-center gap-3 px-4 py-1.5 shrink-0" style={{
-                        background: 'linear-gradient(180deg, #252535, #1e1e2c)',
-                        borderBottom: '1px solid rgba(99,102,241,0.15)',
-                    }}>
-                        <span style={{ fontSize: '11px', fontWeight: 700, color: 'rgba(165,180,252,0.9)', fontFamily: "'SF Mono', monospace", letterSpacing: '1px' }}>TAB</span>
-                        <span style={{ fontSize: '10px', color: 'rgba(165,180,252,0.4)', fontFamily: "'SF Mono', monospace" }}>Standard (EADGBE)</span>
-                        <div style={{ width: '1px', height: '16px', background: 'rgba(99,102,241,0.15)', margin: '0 4px' }}/>
-                        <span style={{ fontSize: '10px', color: 'rgba(165,180,252,0.5)', fontFamily: "'SF Mono', monospace" }}>Beat {inputCursor.toFixed(1)}</span>
-                        <button onClick={() => setInputCursor(0)}
-                            style={{ fontSize: '10px', color: 'rgba(129,140,248,0.8)', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}>
-                            Reset
-                        </button>
-                    </div>
-
-                    {/* Tab notation area */}
-                    <div className="flex-1 flex overflow-hidden">
-                        {/* String labels */}
-                        <div className="flex flex-col justify-center shrink-0" style={{
-                            width: '36px',
-                            borderRight: '2px solid rgba(99,102,241,0.25)',
-                            background: '#16161f',
-                        }}>
-                            {guitarStrings.map((s, i) => (
-                                <div key={i} style={{
-                                    height: `${stringRowH}px`, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                    fontSize: '12px', fontWeight: 700, color: 'rgba(165,180,252,0.7)',
-                                    fontFamily: "'SF Mono', 'Courier New', monospace",
-                                    borderBottom: i < 5 ? '1px solid rgba(99,102,241,0.06)' : 'none',
-                                }}>{s}</div>
-                            ))}
-                        </div>
-
-                        {/* Scrollable tab grid */}
-                        <div className="flex-1 overflow-auto relative" ref={tabScrollRef} style={{ scrollbarWidth: 'thin', scrollbarColor: '#333 #1a1a1a' }}>
-                            <div className="relative" style={{
-                                width: `${totalBeats * tabBeatWidth + 40}px`,
-                                height: `${guitarStrings.length * stringRowH}px`,
-                            }}>
-                                {/* String lines */}
-                                {guitarStrings.map((_, stringIdx) => (
-                                    <div key={stringIdx} className="absolute left-0 right-0" style={{
-                                        top: `${stringIdx * stringRowH + stringRowH / 2}px`,
-                                        height: '1px',
-                                        background: `rgba(165,180,252,${0.12 + stringIdx * 0.01})`,
-                                    }}/>
-                                ))}
-
-                                {/* Measure lines */}
-                                {Array.from({ length: Math.ceil(totalBeats / beatsPerMeasure) + 1 }).map((_, m) => (
-                                    <div key={m} className="absolute" style={{
-                                        left: `${m * beatsPerMeasure * tabBeatWidth}px`,
-                                        top: '0',
-                                        height: `${guitarStrings.length * stringRowH}px`,
-                                        width: m === 0 ? '2px' : '1px',
-                                        background: m === 0 ? 'rgba(99,102,241,0.4)' : 'rgba(99,102,241,0.2)',
-                                    }}/>
-                                ))}
-
-                                {/* Measure numbers */}
-                                {Array.from({ length: Math.ceil(totalBeats / beatsPerMeasure) }).map((_, m) => (
-                                    <div key={m} className="absolute pointer-events-none" style={{
-                                        left: `${m * beatsPerMeasure * tabBeatWidth + 4}px`,
-                                        top: '-16px',
-                                        fontSize: '9px', color: 'rgba(99,102,241,0.4)', fontWeight: 700,
-                                        fontFamily: "'SF Mono', monospace",
-                                    }}>{m + 1}</div>
-                                ))}
-
-                                {/* Beat sub-lines */}
-                                {Array.from({ length: totalBeats }).map((_, beat) => {
-                                    if (beat % beatsPerMeasure === 0) return null;
-                                    return (
-                                        <div key={beat} className="absolute" style={{
-                                            left: `${beat * tabBeatWidth}px`,
-                                            top: '0',
-                                            height: `${guitarStrings.length * stringRowH}px`,
-                                            width: '1px',
-                                            background: 'rgba(255,255,255,0.025)',
-                                        }}/>
-                                    );
-                                })}
-
-                                {/* Fret numbers on tab */}
-                                {derivedTabNotes.map((n, i) => (
-                                    <div key={i}
-                                        className="absolute flex items-center justify-center cursor-pointer"
-                                        style={{
-                                            left: `${n.start * tabBeatWidth - 8}px`,
-                                            top: `${n.string * stringRowH + 4}px`,
-                                            width: '20px', height: '20px',
-                                            background: '#121218',
-                                            fontSize: '13px', fontWeight: 800,
-                                            fontFamily: "'SF Mono', 'Courier New', monospace",
-                                            color: '#818cf8',
-                                            zIndex: 5,
-                                            borderRadius: '2px',
-                                            textShadow: '0 0 6px rgba(129,140,248,0.3)',
-                                        }}
-                                    >
-                                        {n.fret}
-                                    </div>
-                                ))}
-
-                                {/* Click zones for adding notes */}
-                                {guitarStrings.map((_, stringIdx) => (
-                                    <div key={stringIdx} className="absolute left-0 right-0 cursor-crosshair"
-                                        style={{ top: `${stringIdx * stringRowH}px`, height: `${stringRowH}px`, zIndex: 2 }}
-                                        onClick={(e) => {
-                                            const rect = e.currentTarget.parentElement?.getBoundingClientRect();
-                                            if (!rect) return;
-                                            const x = e.clientX - rect.left + (e.currentTarget.parentElement?.parentElement?.scrollLeft || 0);
-                                            const beat = Math.round((x / tabBeatWidth) * 4) / 4;
-                                            addTabNote(stringIdx, 0, beat);
-                                        }}
-                                    />
-                                ))}
-
-                                {/* Playhead */}
-                                {(isNotationPlaying || notationPlayhead > 0) && (
-                                    <div className="absolute pointer-events-none z-20" style={{
-                                        left: `${notationPlayhead * tabBeatWidth}px`,
-                                        top: '-4px',
-                                        height: `${guitarStrings.length * stringRowH + 8}px`,
-                                    }}>
-                                        <div className="absolute" style={{
-                                            left: '-5px', top: '-2px',
-                                            width: 0, height: 0,
-                                            borderLeft: '5px solid transparent', borderRight: '5px solid transparent',
-                                            borderTop: '7px solid #ef4444',
-                                            filter: 'drop-shadow(0 0 3px rgba(239,68,68,0.6))',
-                                        }}/>
-                                        <div style={{
-                                            width: '2px', height: '100%',
-                                            background: 'linear-gradient(180deg, #ef4444, #dc2626)',
-                                            boxShadow: '0 0 8px rgba(239,68,68,0.4), 0 0 2px rgba(239,68,68,0.8)',
-                                            borderRadius: '1px',
-                                        }}/>
-                                    </div>
-                                )}
-                            </div>
-                        </div>
-                    </div>
-
-                    {/* Fretboard input */}
-                    <div className="shrink-0" style={{
-                        borderTop: '1px solid rgba(99,102,241,0.1)',
-                        background: '#16161f', padding: '10px 16px',
-                    }}>
-                        <div style={{ fontSize: '10px', color: 'rgba(165,180,252,0.4)', marginBottom: '6px', fontWeight: 500, fontFamily: "'SF Mono', monospace", letterSpacing: '0.5px' }}>
-                            Click fretboard at beat {inputCursor.toFixed(1)}
-                        </div>
-                        <div style={{
-                            display: 'grid', gridTemplateColumns: 'auto repeat(15, 1fr)',
-                            background: 'linear-gradient(180deg, #2a1f18, #1e1610)',
-                            borderRadius: '6px', overflow: 'hidden',
-                            border: '1px solid rgba(139,92,46,0.3)',
-                            boxShadow: '0 2px 8px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.03)',
-                        }}>
-                            {/* Nut */}
-                            <div style={{ gridColumn: '1', gridRow: '1 / span 6', background: 'linear-gradient(90deg, #d4c8a8, #e0d8c0, #d4c8a8)', width: '5px' }}/>
-                            {guitarStrings.map((stringName, stringIdx) => (
-                                <React.Fragment key={stringIdx}>
-                                    <div style={{
-                                        gridColumn: '1', gridRow: stringIdx + 1,
-                                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                        width: '24px', fontSize: '9px', fontWeight: 700,
-                                        color: 'rgba(212,200,168,0.7)', fontFamily: "'SF Mono', monospace",
-                                    }}>{stringName}</div>
-                                    {Array.from({ length: 15 }).map((_, fret) => {
-                                        const hasDot = [3, 5, 7, 9].includes(fret) && stringIdx === 2;
-                                        const hasDoubleDot = fret === 12 && (stringIdx === 1 || stringIdx === 3);
-                                        return (
-                                            <div
-                                                key={fret}
-                                                onClick={() => addTabNote(stringIdx, fret, inputCursor)}
-                                                style={{
-                                                    height: '22px',
-                                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                                    borderRight: '1px solid rgba(139,92,46,0.2)',
-                                                    borderBottom: stringIdx < 5 ? `1px solid rgba(200,180,140,${0.15 - stringIdx * 0.015})` : 'none',
-                                                    cursor: 'pointer',
-                                                    fontSize: '9px', color: 'rgba(200,180,140,0.5)',
-                                                    fontFamily: "'SF Mono', monospace",
-                                                    background: 'transparent',
-                                                    position: 'relative',
-                                                }}
-                                                onMouseEnter={(e) => { (e.target as HTMLElement).style.background = 'rgba(99,102,241,0.2)'; }}
-                                                onMouseLeave={(e) => { (e.target as HTMLElement).style.background = 'transparent'; }}
-                                            >
-                                                {fret}
-                                                {(hasDot || hasDoubleDot) && <div style={{
-                                                    position: 'absolute', bottom: '-2px',
-                                                    width: '4px', height: '4px', borderRadius: '50%',
-                                                    background: fret === 12 ? 'rgba(212,200,168,0.5)' : 'rgba(139,92,46,0.5)',
-                                                }}/>}
-                                            </div>
-                                        );
-                                    })}
-                                </React.Fragment>
-                            ))}
-                        </div>
-                    </div>
-                </div>
-            );
-        };
-
-        return (
-            <div className="flex-1 flex flex-col overflow-hidden">
-                <div className="h-10 border-b theme-border flex items-center px-3 gap-1 theme-bg-secondary">
-                    <div className="flex items-center rounded-md overflow-hidden border theme-border mr-2">
-                        <button
-                            onClick={() => setNotationView('piano')}
-                            className={`px-3 py-1.5 text-xs flex items-center gap-1.5 border-r theme-border ${notationView === 'piano' ? 'bg-purple-600 text-white' : 'theme-hover theme-text-muted'}`}
-                        >
-                            <Piano size={13}/> Piano Roll
-                        </button>
-                        <button
-                            onClick={() => setNotationView('sheet')}
-                            className={`px-3 py-1.5 text-xs flex items-center gap-1.5 border-r theme-border ${notationView === 'sheet' ? 'bg-purple-600 text-white' : 'theme-hover theme-text-muted'}`}
-                        >
-                            <Music2 size={13}/> Sheet Music
-                        </button>
-                        <button
-                            onClick={() => setNotationView('tab')}
-                            className={`px-3 py-1.5 text-xs flex items-center gap-1.5 ${notationView === 'tab' ? 'bg-purple-600 text-white' : 'theme-hover theme-text-muted'}`}
-                        >
-                            <Guitar size={13}/> Guitar Tab
-                        </button>
-                    </div>
-
-                    <button onClick={() => setShowLibrary(!showLibrary)} className={`px-2.5 py-1.5 rounded text-xs flex items-center gap-1.5 ${showLibrary ? 'bg-purple-600 text-white' : 'theme-bg-tertiary theme-hover'}`} title="Demo Scores Library">
-                        <Library size={13}/> Scores
-                    </button>
-
-                    <div className="w-px h-6 theme-bg-tertiary mx-2"/>
-
-                    <button
-                        onClick={() => { stopNotation(); setNotationPlayhead(0); }}
-                        className="p-2 theme-hover rounded" title="Rewind"
-                    >
-                        <SkipBack size={16}/>
-                    </button>
-                    <button
-                        onClick={playNotation}
-                        className={`p-1.5 rounded ${isNotationPlaying ? 'bg-red-500 hover:bg-red-600 text-white' : 'theme-bg-tertiary theme-hover'}`}
-                        title={isNotationPlaying ? 'Stop' : 'Play'}
-                    >
-                        {isNotationPlaying ? <Square size={14}/> : <Play size={14}/>}
-                    </button>
-
-                    <div className="w-px h-6 theme-bg-tertiary mx-2"/>
-
-                    <span className="text-xs theme-text-muted">BPM:</span>
-                    <input
-                        type="number"
-                        value={notationBpm}
-                        onChange={(e) => setNotationBpm(Math.max(40, Math.min(300, parseInt(e.target.value) || 120)))}
-                        className="w-16 px-2 py-1 theme-bg-tertiary rounded text-sm"
-                    />
-
-                    <span className="text-xs theme-text-muted ml-2">Time:</span>
-                    <select
-                        value={`${notationTimeSignature[0]}/${notationTimeSignature[1]}`}
-                        onChange={(e) => {
-                            const [n, d] = e.target.value.split('/').map(Number);
-                            setNotationTimeSignature([n, d]);
-                        }}
-                        className="px-2 py-1 theme-bg-tertiary rounded text-sm"
-                    >
-                        <option value="4/4">4/4</option>
-                        <option value="3/4">3/4</option>
-                        <option value="2/4">2/4</option>
-                        <option value="6/8">6/8</option>
-                        <option value="5/4">5/4</option>
-                        <option value="7/8">7/8</option>
-                        <option value="2/2">2/2</option>
-                        <option value="3/8">3/8</option>
-                        <option value="12/8">12/8</option>
-                    </select>
-
-                    <div className="w-px h-6 theme-bg-tertiary mx-2"/>
-
-                    <span className="text-xs theme-text-muted">Sound:</span>
-                    <select
-                        value={notationInstrument}
-                        onChange={(e) => setNotationInstrument(e.target.value as typeof notationInstrument)}
-                        className="px-2 py-1 theme-bg-tertiary rounded text-sm"
-                    >
-                        <option value="triangle">{notationView === 'tab' ? 'Clean' : 'Piano'}</option>
-                        <option value="sine">{notationView === 'tab' ? 'Mellow' : 'Flute'}</option>
-                        <option value="square">{notationView === 'tab' ? 'Drive' : 'Organ'}</option>
-                        <option value="sawtooth">{notationView === 'tab' ? 'Distortion' : 'Strings'}</option>
-                    </select>
-
-                    <div className="flex-1"/>
-
-                    <div className="w-px h-6 theme-bg-tertiary mx-1"/>
-
-                    <button onClick={notationUndo} disabled={notationUndoStack.length === 0}
-                        className={`p-1.5 rounded ${notationUndoStack.length > 0 ? 'theme-hover' : 'opacity-30'}`} title="Undo (Ctrl+Z)">
-                        <Undo size={14}/>
-                    </button>
-                    <button onClick={notationRedo} disabled={notationRedoStack.length === 0}
-                        className={`p-1.5 rounded ${notationRedoStack.length > 0 ? 'theme-hover' : 'opacity-30'}`} title="Redo (Ctrl+Y)">
-                        <Redo size={14}/>
-                    </button>
-
-                    <div className="w-px h-6 theme-bg-tertiary mx-1"/>
-
-                    <button onClick={copySelectedNotes} disabled={selectedNotes.size === 0}
-                        className={`p-1.5 rounded ${selectedNotes.size > 0 ? 'theme-hover' : 'opacity-30'}`} title="Copy (Ctrl+C)">
-                        <Copy size={14}/>
-                    </button>
-                    <button onClick={pasteNotes} disabled={notationClipboard.length === 0}
-                        className={`p-1.5 rounded ${notationClipboard.length > 0 ? 'theme-hover' : 'opacity-30'}`} title="Paste (Ctrl+V)">
-                        <ClipboardPaste size={14}/>
-                    </button>
-
-                    {selectedNotes.size > 0 && (
-                        <>
-                            <div className="w-px h-6 theme-bg-tertiary mx-1"/>
-                            <button onClick={() => transposeSelected(1)} className="px-1.5 py-1 theme-bg-tertiary theme-hover rounded text-[10px]" title="Transpose Up">+1</button>
-                            <button onClick={() => transposeSelected(-1)} className="px-1.5 py-1 theme-bg-tertiary theme-hover rounded text-[10px]" title="Transpose Down">-1</button>
-                            <button onClick={() => transposeSelected(12)} className="px-1.5 py-1 theme-bg-tertiary theme-hover rounded text-[10px]" title="Octave Up">+Oct</button>
-                            <button onClick={() => transposeSelected(-12)} className="px-1.5 py-1 theme-bg-tertiary theme-hover rounded text-[10px]" title="Octave Down">-Oct</button>
-                        </>
-                    )}
-
-                    <div className="flex-1"/>
-
-                    <span className="text-xs theme-text-muted">Meas:</span>
-                    <select
-                        value={notationMeasures}
-                        onChange={(e) => setNotationMeasures(parseInt(e.target.value))}
-                        className="w-14 px-1 py-1 theme-bg-tertiary rounded text-sm"
-                    >
-                        {[4, 8, 16, 24, 32, 48, 64].map(n => <option key={n} value={n}>{n}</option>)}
-                    </select>
-
-                    <div className="w-px h-6 theme-bg-tertiary mx-1"/>
-
-                    <button onClick={exportMusicXML} disabled={pianoNotes.length === 0}
-                        className={`p-1.5 rounded ${pianoNotes.length > 0 ? 'theme-hover' : 'opacity-30'}`} title="Save as MusicXML (reads in MuseScore, Finale, Sibelius, Logic, Dorico)">
-                        <Save size={14}/>
-                    </button>
-                    <button onClick={importMusicXML} className="p-1.5 theme-hover rounded" title="Open MusicXML">
-                        <FolderOpen size={14}/>
-                    </button>
-                    <button onClick={exportMidi} disabled={pianoNotes.length === 0}
-                        className={`px-2 py-1 rounded text-xs flex items-center gap-1 ${pianoNotes.length > 0 ? 'theme-bg-tertiary theme-hover' : 'opacity-30'}`} title="Export as MIDI (for DAWs)">
-                        <Download size={12}/> MIDI
-                    </button>
-
-                    <div className="w-px h-6 theme-bg-tertiary mx-1"/>
-
-                    <button
-                        onClick={deleteSelectedNotes}
-                        disabled={selectedNotes.size === 0}
-                        className={`px-2 py-1 rounded text-sm flex items-center gap-1 ${selectedNotes.size > 0 ? 'bg-red-600 hover:bg-red-700' : 'theme-bg-tertiary opacity-50'}`}
-                    >
-                        <Trash2 size={12}/> {selectedNotes.size > 0 ? selectedNotes.size : ''}
-                    </button>
-
-                    <button
-                        onClick={() => { pushNotationUndo(); setPianoNotes([]); setSelectedNotes(new Set()); setInputCursor(0); }}
-                        className="px-2 py-1 theme-bg-tertiary theme-hover rounded text-xs"
-                    >
-                        Clear
-                    </button>
-                </div>
-
-                {showLibrary ? (
-                    <div className="flex-1 overflow-auto" style={{ background: '#1a1a2e' }}>
-                        <div className="max-w-4xl mx-auto p-6">
-                            <div className="flex items-center justify-between mb-4">
-                                <h2 className="text-lg font-semibold text-white">Score Library</h2>
-                                <button onClick={() => setShowLibrary(false)} className="p-1 rounded hover:bg-white/10">
-                                    <X size={16} className="text-gray-400"/>
-                                </button>
-                            </div>
-
-                            {(['classical', 'folk', 'guitar'] as const).map(cat => (
-                                <div key={cat} className="mb-6">
-                                    <h3 className="text-xs font-bold uppercase tracking-wider mb-2" style={{ color: cat === 'classical' ? '#a78bfa' : cat === 'folk' ? '#34d399' : '#f59e0b' }}>
-                                        {cat === 'classical' ? 'Classical' : cat === 'folk' ? 'World Folk' : 'Guitar Masters'}
-                                    </h3>
-                                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-                                        {demoScores.filter(s => s.category === cat).map((score, i) => (
-                                            <button
-                                                key={i}
-                                                onClick={() => loadDemoScore(score)}
-                                                className="text-left p-3 rounded-lg border transition-colors hover:border-purple-500/50"
-                                                style={{ background: 'rgba(255,255,255,0.04)', borderColor: 'rgba(255,255,255,0.08)' }}
-                                            >
-                                                <div className="text-sm font-medium text-white truncate">{score.title}</div>
-                                                <div className="text-xs text-gray-400 mt-0.5">{score.composer}</div>
-                                                <div className="flex items-center gap-2 mt-1.5 text-[10px] text-gray-500">
-                                                    <span>{score.region}</span>
-                                                    <span>·</span>
-                                                    <span>{score.year}</span>
-                                                    <span>·</span>
-                                                    <span>{score.key} {score.timeSignature[0]}/{score.timeSignature[1]}</span>
-                                                    <span>·</span>
-                                                    <span>{score.notes.length} notes</span>
-                                                </div>
-                                            </button>
-                                        ))}
-                                    </div>
-                                </div>
-                            ))}
-
-                            <p className="text-[10px] text-gray-600 mt-4">All scores are public domain excerpts. Import full scores via MusicXML from IMSLP or MuseScore.</p>
-                        </div>
-                    </div>
-                ) : (
-                    <>
-                        {notationView === 'piano' && renderPianoRoll()}
-                        {notationView === 'sheet' && renderSheetMusic()}
-                        {notationView === 'tab' && renderGuitarTab()}
-                    </>
-                )}
-            </div>
-        );
-    };
 
     const createAudioDataset = () => {
         if (!newDatasetName.trim()) return;
@@ -6950,230 +2802,206 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
         });
     };
 
-    const renderDatasets = () => (
-        <div className="flex h-full overflow-hidden">
-            <div className="w-64 border-r theme-border flex flex-col theme-bg-secondary">
-                <div className="p-3 border-b theme-border">
-                    <button
-                        onClick={() => setShowCreateDataset(true)}
-                        className="w-full py-2 bg-purple-600 hover:bg-purple-500 text-white rounded text-sm flex items-center justify-center gap-2"
-                    >
-                        <Plus size={14} /> New Dataset
-                    </button>
-                </div>
-                <div className="flex-1 overflow-y-auto p-2 space-y-1">
-                    {audioDatasets.length === 0 ? (
-                        <div className="text-center py-8 theme-text-muted text-sm">
-                            <Package size={32} className="mx-auto mb-2 opacity-50"/>
-                            <p>No datasets yet</p>
-                            <p className="text-xs mt-1">Create one to start collecting training data</p>
-                        </div>
-                    ) : (
-                        audioDatasets.map(dataset => (
-                            <div
-                                key={dataset.id}
-                                onClick={() => setSelectedDatasetId(dataset.id)}
-                                className={`p-3 rounded cursor-pointer ${
-                                    selectedDatasetId === dataset.id
-                                        ? 'bg-purple-600/20 border border-purple-500/50'
-                                        : 'theme-hover'
-                                }`}
-                            >
-                                <div className="flex items-center justify-between">
-                                    <span className="font-medium text-sm">{dataset.name}</span>
-                                    <span className="text-xs theme-text-muted">{dataset.examples.length}</span>
-                                </div>
-                                <div className="text-xs theme-text-muted mt-1">
-                                    {new Date(dataset.updatedAt).toLocaleDateString()}
-                                </div>
-                            </div>
-                        ))
-                    )}
-                </div>
-            </div>
-
-            <div className="flex-1 flex flex-col overflow-hidden">
-                {selectedDataset ? (
-                    <>
-                        <div className="p-4 border-b theme-border flex items-center justify-between theme-bg-secondary">
-                            <div>
-                                <h4 className="font-semibold">{selectedDataset.name}</h4>
-                                <p className="text-xs theme-text-muted">
-                                    {selectedDataset.examples.length} audio samples
-                                </p>
-                            </div>
-                            <div className="flex items-center gap-2">
-                                <select
-                                    value={datasetExportFormat}
-                                    onChange={(e) => setDatasetExportFormat(e.target.value as any)}
-                                    className="px-2 py-1 text-xs theme-bg-secondary border theme-border rounded"
-                                >
-                                    <option value="jsonl">JSONL</option>
-                                    <option value="csv">CSV</option>
-                                    <option value="json">Full JSON</option>
-                                </select>
-                                <button
-                                    onClick={() => exportAudioDataset(selectedDataset)}
-                                    className="px-3 py-1.5 bg-green-600 hover:bg-green-500 text-white rounded text-xs flex items-center gap-1"
-                                >
-                                    <Download size={12} /> Export
-                                </button>
-                                <button
-                                    onClick={() => deleteAudioDataset(selectedDataset.id)}
-                                    className="px-2 py-1.5 bg-red-600/20 hover:bg-red-600/40 text-red-400 rounded text-xs"
-                                >
-                                    <Trash2 size={12} />
-                                </button>
-                            </div>
-                        </div>
-
-                        <div className="flex-1 overflow-y-auto p-4 space-y-3">
-                            {selectedDataset.examples.length === 0 ? (
-                                <div className="text-center py-12 theme-text-muted">
-                                    <Layers size={32} className="mx-auto mb-2 opacity-50" />
-                                    <p>No samples in this dataset</p>
-                                    <p className="text-xs mt-1">Generate audio and add it here</p>
-                                </div>
-                            ) : (
-                                selectedDataset.examples.map(ex => (
-                                    <div key={ex.id} className="p-4 theme-bg-secondary rounded-lg border theme-border">
-                                        <div className="flex items-start gap-4">
-                                            <div className="w-16 h-16 bg-gradient-to-br from-purple-600/30 to-pink-600/30 rounded-lg flex items-center justify-center flex-shrink-0">
-                                                <Music size={24} className="text-purple-400"/>
-                                            </div>
-                                            <div className="flex-1 min-w-0">
-                                                <p className="font-medium text-sm truncate">{ex.prompt}</p>
-                                                <div className="flex items-center gap-3 mt-1 text-xs theme-text-muted">
-                                                    <span>{formatTime(ex.duration)}</span>
-                                                    <span className="px-1.5 py-0.5 theme-bg-tertiary rounded">{ex.model}</span>
-                                                </div>
-                                            </div>
-                                        </div>
-                                        <div className="flex items-center justify-between mt-3 pt-3 border-t theme-border">
-                                            <div className="flex items-center gap-2">
-                                                <span className="text-xs theme-text-muted">Quality:</span>
-                                                {[1, 2, 3, 4, 5].map(score => (
-                                                    <button
-                                                        key={score}
-                                                        onClick={() => updateAudioExampleQuality(selectedDataset.id, ex.id, score)}
-                                                        className={`p-0.5 ${ex.qualityScore >= score ? 'text-purple-400' : 'theme-text-muted'}`}
-                                                    >
-                                                        <Star size={14} fill={ex.qualityScore >= score ? 'currentColor' : 'none'} />
-                                                    </button>
-                                                ))}
-                                            </div>
-                                            <div className="flex items-center gap-2">
-                                                <button className="text-purple-400 hover:text-purple-300">
-                                                    <Play size={14} />
-                                                </button>
-                                                <button
-                                                    onClick={() => removeAudioExample(selectedDataset.id, ex.id)}
-                                                    className="text-red-400 hover:text-red-300"
-                                                >
-                                                    <Trash2 size={12} />
-                                                </button>
-                                            </div>
-                                        </div>
-                                    </div>
-                                ))
-                            )}
-                        </div>
-                    </>
-                ) : (
-                    <div className="flex-1 flex items-center justify-center theme-text-muted">
-                        <div className="text-center">
-                            <Package size={48} className="mx-auto mb-3 opacity-50" />
-                            <p>Select a dataset or create a new one</p>
-                            <p className="text-xs mt-2">Use the Generate tab to create audio, then add it to datasets</p>
-                        </div>
-                    </div>
-                )}
-            </div>
-
-            {showCreateDataset && (
-                <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[200]" onClick={() => setShowCreateDataset(false)}>
-                    <div className="theme-bg-secondary rounded-lg shadow-xl w-96 p-6" onClick={e => e.stopPropagation()}>
-                        <h4 className="text-lg font-semibold mb-4 flex items-center gap-2">
-                            <Package className="text-purple-400" size={18} />
-                            Create Audio Dataset
-                        </h4>
-                        <input
-                            type="text"
-                            value={newDatasetName}
-                            onChange={(e) => setNewDatasetName(e.target.value)}
-                            onKeyDown={(e) => e.key === 'Enter' && createAudioDataset()}
-                            placeholder="Dataset name..."
-                            className="w-full px-3 py-2 theme-bg-tertiary theme-text-primary border theme-border rounded focus:border-purple-500 focus:outline-none mb-4"
-                            autoFocus
-                        />
-                        <div className="flex justify-end gap-2">
-                            <button
-                                onClick={() => setShowCreateDataset(false)}
-                                className="px-4 py-2 theme-bg-tertiary theme-hover theme-text-primary rounded"
-                            >
-                                Cancel
-                            </button>
-                            <button
-                                onClick={createAudioDataset}
-                                disabled={!newDatasetName.trim()}
-                                className="px-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded"
-                            >
-                                Create
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            )}
-        </div>
-    );
 
     return (
-        <div className="flex flex-col h-full overflow-hidden">
+        <div className="flex flex-col h-full w-full overflow-hidden">
             <div className="flex-1 flex overflow-hidden">
                 {renderSidebar()}
-                <main className="flex-1 flex flex-col overflow-hidden relative">
+                <main className="flex-1 w-full flex flex-col overflow-hidden relative">
                     <div className="flex items-center h-10 px-2 theme-bg-primary border-b theme-border shrink-0">
                         <div className="relative group">
-                            <button className="flex items-center gap-2 px-3 py-1.5 theme-bg-secondary theme-hover rounded-lg border theme-border text-sm backdrop-blur-sm">
+                            <button className="flex items-center gap-2 px-3 py-1.5 theme-bg-secondary theme-hover rounded-lg border theme-border text-sm">
                                 <CurrentModeIcon size={16} className="text-purple-400"/>
                                 <span className="font-medium">{currentMode_obj.name}</span>
                                 <ChevronRight size={14} className="theme-text-muted rotate-90"/>
                             </button>
-                            <div className="absolute top-full left-0 mt-1 w-48 theme-bg-secondary backdrop-blur-sm rounded-lg border theme-border shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+                            <div className="absolute top-full left-0 mt-1 w-48 theme-bg-secondary rounded-lg border theme-border shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
                                 <div className="py-1">
-                                    {['browse', 'create', 'edit', 'analyze', 'train'].map(group => (
-                                        <React.Fragment key={group}>
-                                            <div className="px-3 py-1 text-xs theme-text-muted uppercase">{group}</div>
-                                            {SCHERZO_MODES.filter(m => m.group === group).map(mode => {
-                                                const ModeIcon = mode.icon;
-                                                return (
-                                                    <button
-                                                        key={mode.id}
-                                                        onClick={() => setActiveMode(mode.id)}
-                                                        className={`w-full px-3 py-1.5 flex items-center gap-2 text-sm theme-hover ${
-                                                            activeMode === mode.id ? 'text-purple-400 bg-purple-600/20' : 'theme-text-secondary'
-                                                        }`}
-                                                    >
-                                                        <ModeIcon size={14}/>{mode.name}
-                                                    </button>
-                                                );
-                                            })}
-                                        </React.Fragment>
-                                    ))}
+                                    {SCHERZO_MODES.map(mode => {
+                                        const ModeIcon = mode.icon;
+                                        return (
+                                            <button
+                                                key={mode.id}
+                                                onClick={() => setActiveMode(mode.id)}
+                                                className={`w-full px-3 py-1.5 flex items-center gap-2 text-sm theme-hover ${
+                                                    activeMode === mode.id ? 'text-purple-400 bg-purple-600/20' : 'theme-text-secondary'
+                                                }`}
+                                            >
+                                                <ModeIcon size={14}/>{mode.name}
+                                            </button>
+                                        );
+                                    })}
                                 </div>
                             </div>
                         </div>
                     </div>
 
-                    {activeMode === 'library' && renderLibrary()}
-                    {activeMode === 'repertoire' && renderRepertoire()}
-                    {aiEnabled && activeMode === 'generator' && renderGenerator()}
-                    {activeMode === 'editor' && renderEditor()}
-                    {activeMode === 'dj' && renderDJMixer()}
-                    {activeMode === 'analysis' && renderAnalysis()}
-                    {activeMode === 'notation' && renderNotation()}
-                    {activeMode === 'datasets' && renderDatasets()}
-                    {activeMode === 'beats' && renderBeatMaker()}
+                    {activeMode === 'library' && (
+                        <LibraryPanel
+                            libTracks={libTracks} libPlaylists={libPlaylists}
+                            libQueue={libQueue} libQueueIndex={libQueueIndex}
+                            setLibQueue={setLibQueue} setLibQueueIndex={setLibQueueIndex}
+                            libIndexedFolders={libIndexedFolders}
+                            libViewMode={libViewMode} setLibViewMode={setLibViewMode}
+                            libSort={libSort} setLibSort={setLibSort}
+                            libSearch={libSearch} setLibSearch={setLibSearch}
+                            libSelectedPlaylist={libSelectedPlaylist} setLibSelectedPlaylist={setLibSelectedPlaylist}
+                            libPlaylistTracks={libPlaylistTracks} setLibPlaylistTracks={setLibPlaylistTracks}
+                            libYtResults={libYtResults} setLibYtResults={setLibYtResults}
+                            libYtSearching={libYtSearching} setLibYtSearching={setLibYtSearching}
+                            libYtDownloading={libYtDownloading} setLibYtDownloading={setLibYtDownloading}
+                            libIndexing={libIndexing} setLibIndexing={setLibIndexing}
+                            libShowYtSearch={libShowYtSearch} setLibShowYtSearch={setLibShowYtSearch}
+                            libNewPlaylistName={libNewPlaylistName} setLibNewPlaylistName={setLibNewPlaylistName}
+                            libRefreshing={libRefreshing}
+                            libRadioFavorites={libRadioFavorites} setLibRadioFavorites={setLibRadioFavorites}
+                            libRadioActive={libRadioActive} setLibRadioActive={setLibRadioActive}
+                            libRadioStation={libRadioStation} setLibRadioStation={setLibRadioStation}
+                            libYtMusicToken={libYtMusicToken} setLibYtMusicToken={setLibYtMusicToken}
+                            libLastFmToken={libLastFmToken} setLibLastFmToken={setLibLastFmToken}
+                            refreshLibrary={refreshLibrary}
+                            audioRef={audioRef} setIsPlaying={setIsPlaying}
+                            setSelectedAudio={setSelectedAudio} selectedAudio={selectedAudio}
+                            audioSource={audioSource}
+                            formatTime={formatTime}
+                        />
+                    )}
+                    {activeMode === 'editor' && (
+                        <EditorPanel
+                            tracks={tracks} setTracks={setTracks}
+                            editorPlayhead={editorPlayhead} setEditorPlayhead={setEditorPlayhead}
+                            isEditorPlaying={isEditorPlaying} setIsEditorPlaying={setIsEditorPlaying}
+                            editorTool={editorTool} setEditorTool={setEditorTool}
+                            editorZoom={editorZoom} setEditorZoom={setEditorZoom}
+                            editorPosition={editorPosition} setEditorPosition={setEditorPosition}
+                            isRecording={isRecording} setIsRecording={setIsRecording}
+                            selectedClipId={selectedClipId} setSelectedClipId={setSelectedClipId}
+                            lockedTracks={lockedTracks} setLockedTracks={setLockedTracks}
+                            armedTracks={armedTracks} setArmedTracks={setArmedTracks}
+                            markers={markers} setMarkers={setMarkers}
+                            projectBpm={projectBpm} setProjectBpm={setProjectBpm}
+                            showBpmGrid={showBpmGrid} setShowBpmGrid={setShowBpmGrid}
+                            waveformZoom={waveformZoom} setWaveformZoom={setWaveformZoom}
+                            showEffectsPanel={showEffectsPanel} setShowEffectsPanel={setShowEffectsPanel}
+                            masterVolume={masterVolume} setMasterVolume={setMasterVolume}
+                            audioFiles={audioFiles} setAudioFiles={setAudioFiles}
+                            waveformCache={waveformCache} waveformDataCache={waveformDataCache}
+                            selectionRange={selectionRange} setSelectionRange={setSelectionRange}
+                            loopEnabled={loopEnabled} setLoopEnabled={setLoopEnabled}
+                            loopStart={loopStart} setLoopStart={setLoopStart}
+                            loopEnd={loopEnd} setLoopEnd={setLoopEnd}
+                            contextMenu={contextMenu} setContextMenu={setContextMenu}
+                            snapToGrid={snapToGrid} setSnapToGrid={setSnapToGrid}
+                            gridSize={gridSize} setGridSize={setGridSize}
+                            undoStack={undoStack} redoStack={redoStack}
+                            clipboard={clipboard}
+                            dragState={dragState} setDragState={setDragState}
+                            trackLevels={trackLevels}
+                            recordingWaveform={recordingWaveform} setRecordingWaveform={setRecordingWaveform}
+                            selectedAudio={selectedAudio} audioSource={audioSource}
+                            recordingClipRef={recordingClipRef}
+                            recordingWaveCanvasRef={recordingWaveCanvasRef}
+                            recordingWaveAnimRef={recordingWaveAnimRef}
+                            recordingAudioCtxRef={recordingAudioCtxRef}
+                            recordingAnalyserRef={recordingAnalyserRef}
+                            mediaRecorderRef={mediaRecorderRef}
+                            recordingStartTimeRef={recordingStartTimeRef}
+                            recordingPlayheadStartRef={recordingPlayheadStartRef}
+                            recordingHistoryRef={recordingHistoryRef}
+                            recordingStartDrawRef={recordingStartDrawRef}
+                            editorContainerRef={editorContainerRef}
+                            addMarker={addMarker}
+                            playEditorTimeline={playEditorTimeline} stopEditorTimeline={stopEditorTimeline}
+                            cutClip={cutClip} copyClip={copyClip} pasteClip={pasteClip}
+                            deleteClip={deleteClip} splitClipAtPlayhead={splitClipAtPlayhead}
+                            saveUndoState={saveUndoState}
+                            editorUndo={editorUndo} editorRedo={editorRedo}
+                            loadWaveform={loadWaveform} loadAudioFiles={loadAudioFiles}
+                            exportTimeline={exportTimeline}
+                            duplicateClip={duplicateClip} normalizeClip={normalizeClip}
+                            addFadeToClip={addFadeToClip}
+                            adjustClipGain={adjustClipGain}
+                            setClipColor={setClipColor}
+                            formatTime={formatTime} formatTimeMs={formatTimeMs}
+                            snapToGridTime={snapToGridTime}
+                            renderWaveformPath={renderWaveformPath}
+                        />
+                    )}
+                    {activeMode === 'dj' && (
+                        <DJMixerPanel
+                            deckA={deckA} setDeckA={setDeckA}
+                            deckB={deckB} setDeckB={setDeckB}
+                            deckARef={deckARef} deckBRef={deckBRef}
+                            djMasterGain={djMasterGain} setDjMasterGain={setDjMasterGain}
+                            crossfader={crossfader} setCrossfader={setCrossfader}
+                            crossfaderCurve={crossfaderCurve} setCrossfaderCurve={setCrossfaderCurve}
+                            deckAEffects={deckAEffects} setDeckAEffects={setDeckAEffects}
+                            deckBEffects={deckBEffects} setDeckBEffects={setDeckBEffects}
+                            selectedAudio={selectedAudio} setSelectedAudio={setSelectedAudio}
+                            setAudioFiles={setAudioFiles}
+                            waveformCache={waveformCache} waveformDataCache={waveformDataCache}
+                            nudgeDeck={nudgeDeck} detectBeats={detectBeats}
+                            loadWaveform={loadWaveform} formatTime={formatTime}
+                            defaultDeckState={defaultDeckState}
+                            libYtMusicToken={libYtMusicToken} setLibYtMusicToken={setLibYtMusicToken}
+                            libLastFmToken={libLastFmToken} setLibLastFmToken={setLibLastFmToken}
+                        />
+                    )}
+                    {activeMode === 'notation' && (
+                        <NotationPanel
+                            notationView={notationView} setNotationView={setNotationView}
+                            notationTracks={notationTracks}
+                            activeTrackIdx={activeTrackIdx} setActiveTrackIdx={setActiveTrackIdx}
+                            pianoNotes={pianoNotes} setPianoNotes={setPianoNotes}
+                            inputCursor={inputCursor} setInputCursor={setInputCursor}
+                            inputNoteDuration={inputNoteDuration} setInputNoteDuration={setInputNoteDuration}
+                            notationZoom={notationZoom}
+                            notationPlayhead={notationPlayhead} setNotationPlayhead={setNotationPlayhead}
+                            isNotationPlaying={isNotationPlaying} setIsNotationPlaying={setIsNotationPlaying}
+                            notationBpm={notationBpm} setNotationBpm={setNotationBpm}
+                            notationTimeSignature={notationTimeSignature} setNotationTimeSignature={setNotationTimeSignature}
+                            notationInstrument={notationInstrument} setNotationInstrument={setNotationInstrument}
+                            notationClef={notationClef} setNotationClef={setNotationClef}
+                            notationKeySignature={notationKeySignature} setNotationKeySignature={setNotationKeySignature}
+                            notationMeasures={notationMeasures} setNotationMeasures={setNotationMeasures}
+                            workTitle={workTitle} setWorkTitle={setWorkTitle}
+                            composer={composer} setComposer={setComposer}
+                            selectedNotes={selectedNotes} setSelectedNotes={setSelectedNotes}
+                            pianoRollDrag={pianoRollDrag} setPianoRollDrag={setPianoRollDrag}
+                            noteContextMenu={noteContextMenu} setNoteContextMenu={setNoteContextMenu}
+                            notationClipboard={notationClipboard}
+                            inputOctave={inputOctave} setInputOctave={setInputOctave}
+                            showLibrary={showLibrary} setShowLibrary={setShowLibrary}
+                            audioFiles={audioFiles} setAudioFiles={setAudioFiles}
+                            notationUndoStack={notationUndoStack}
+                            notationRedoStack={notationRedoStack}
+                            notationMutedTracks={notationMutedTracks} setNotationMutedTracks={setNotationMutedTracks}
+                            addPianoNote={addPianoNote} pushNotationUndo={pushNotationUndo}
+                            noteToName={noteToName} noteToFrequency={noteToFrequency}
+                            playNote={playNote} playNotation={playNotation} stopNotation={stopNotation}
+                            notationUndo={notationUndo} notationRedo={notationRedo}
+                            copySelectedNotes={copySelectedNotes} pasteNotes={pasteNotes}
+                            deleteSelectedNotes={deleteSelectedNotes} transposeSelected={transposeSelected}
+                            exportMidi={exportMidi} exportMusicXML={exportMusicXML}
+                            importMusicXML={importMusicXML} loadDemoScore={loadDemoScore}
+                            ghostNoteRef={ghostNoteRef} ghostLabelRef={ghostLabelRef}
+                            staveLayoutRef={staveLayoutRef} sheetMusicScrollRef={sheetMusicScrollRef}
+                            sheetPlayheadRef={sheetPlayheadRef}
+                            pianoRollGridRef={pianoRollGridRef} pianoRollScrollRef={pianoRollScrollRef}
+                            tabScrollRef={tabScrollRef}
+                            dragNoteRef={dragNoteRef}
+                        />
+                    )}
+                    {activeMode === 'beats' && (
+                        <BeatMakerPanel
+                            beatPattern={beatPattern} setBeatPattern={setBeatPattern}
+                            beatBpm={beatBpm} setBeatBpm={setBeatBpm}
+                            beatPlaying={beatPlaying} setBeatPlaying={setBeatPlaying}
+                            beatCurrentStep={beatCurrentStep} setBeatCurrentStep={setBeatCurrentStep}
+                            beatPlayRef={beatPlayRef}
+                            beatAudioCtxRef={beatAudioCtxRef}
+                        />
+                    )}
 
                     {visualizerActive && (
                         <div className="absolute inset-0 bg-black/95 z-50 flex flex-col">
