@@ -310,8 +310,7 @@ const LibraryPanel: React.FC<LibraryPanelProps> = ({
                                         <button
                                             onClick={async () => {
                                                 setLibYtDownloading(r.id);
-                                                const dlPath = libIndexedFolders[0]?.path || audioSource || await window.api?.getHomeDir?.() || '';
-                                                const result = await window.api?.libraryYoutubeDownload?.(r.url, dlPath);
+                                                const result = await window.api?.libraryYoutubeDownload?.(r.url);
                                                 setLibYtDownloading(null);
                                                 if (result?.success) refreshLibrary();
                                                 else alert(result?.error || 'Download failed');

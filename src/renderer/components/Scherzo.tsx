@@ -24,13 +24,14 @@ import LibraryPanel from './LibraryPanel';
 import DJMixerPanel from './DJMixerPanel';
 import NotationPanel from './NotationPanel';
 import EditorPanel from './EditorPanel';
+import BeatMakerPanel from './BeatMakerPanel';
 
 interface ScherzoProps {
     currentPath?: string;
     onClose?: () => void;
 }
 
-interface AudioFile {
+export interface AudioFile {
     id: string;
     name: string;
     path: string;
@@ -74,6 +75,7 @@ interface AudioClip {
     fadeIn: number;
     fadeOut: number;
     color?: number;
+    reversed?: boolean;
 }
 
 interface TimelineMarker {
@@ -243,8 +245,6 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
     const [libShowYtSearch, setLibShowYtSearch] = useState(false);
     const [libNewPlaylistName, setLibNewPlaylistName] = useState('');
     const [libRefreshing, setLibRefreshing] = useState(false);
-    const [libYtMusicToken, setLibYtMusicToken] = useState('');
-    const [libLastFmToken, setLibLastFmToken] = useState('');
     const [libRadioFavorites, setLibRadioFavorites] = useState<any[]>(() => {
         try { return JSON.parse(localStorage.getItem('scherzo_radio_favorites') || '[]'); } catch { return []; }
     });
@@ -719,7 +719,7 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
     const loadAudioFiles = async (source: string) => {
         try {
 
-            const dirContents = await window.api?.listDirectory?.(source);
+            const dirContents = await window.api?.readDirectory?.(source);
             if (dirContents && Array.isArray(dirContents)) {
                 const audioExtensions = ['mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac', 'wma', 'aiff'];
                 const files = dirContents
@@ -1084,16 +1084,6 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
         if (activeMode === 'repertoire') repertoireRefreshList();
     }, [activeMode, repertoireRefreshList]);
 
-    useEffect(() => {
-        const api = window.api;
-        if (!api?.onRepertoireDownloadProgress) return;
-        const off = api.onRepertoireDownloadProgress((data: { url: string; line: string }) => {
-            const lines = String(data?.line || '').split(/\r?\n/).filter(Boolean);
-            if (lines.length === 0) return;
-            setRepertoireProgressLog(prev => [...prev, ...lines].slice(-30));
-        });
-        return () => { try { off?.(); } catch {} };
-    }, []);
 
     useEffect(() => {
         if (repertoireSelectedId != null) repertoireLoadDetail(repertoireSelectedId);
@@ -1126,7 +1116,7 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
         const picked: string | undefined = Array.isArray(result) ? result[0]?.path : result?.filePaths?.[0];
         if (!picked) return;
         const title = (picked.split('/').pop() || 'Untitled').replace(/\.[^.]+$/, '');
-        const r = await api.repertoireImportLocalFile({ sourcePath: picked, title });
+        const r = await api.repertoireCreate({ title, audio_path: picked, source_type: 'local' });
         if (r?.success) {
             await repertoireRefreshList();
             setRepertoireSelectedId(r.id);
@@ -1137,19 +1127,21 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
 
     const repertoireDownload = async () => {
         const api = window.api;
-        // Strip stray characters (backslashes, quotes) from paste
         const url = repertoireYouTubeUrl.trim().replace(/^[\\"']+|[\\"']+$/g, '');
-        if (!url || !api?.repertoireDownloadYouTube) return;
+        if (!url || !api?.libraryYoutubeDownload) return;
         setRepertoireError(null);
         setRepertoireProgressLog([]);
         setRepertoireDownloading(true);
         try {
-            const r = await api.repertoireDownloadYouTube({ url, title: '' });
+            const r = await api.libraryYoutubeDownload(url);
             if (r?.success) {
                 setRepertoireYouTubeUrl('');
                 setRepertoireProgressLog([]);
                 await repertoireRefreshList();
-                setRepertoireSelectedId(r.id);
+                if (r.path) {
+                    const createR = await api.repertoireCreate({ title: r.title || url, audio_path: r.path, source_type: 'youtube', source_url: url });
+                    if (createR?.success) setRepertoireSelectedId(createR.id);
+                }
             } else {
                 setRepertoireError(r?.error || 'download failed');
             }
@@ -1329,12 +1321,8 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
         setRepertoireError(null);
         setRepertoireDeriving(true);
         try {
-            const api = window.api;
-            const r = await api.repertoireDeriveSheet({ repertoireId: repertoireSelectedId });
-            if (!r?.success) setRepertoireError(r?.error || 'derive failed');
-            else {
-                await repertoireLoadDetail(repertoireSelectedId);
-            }
+            // Derive sheet is not implemented; open empty notation instead
+            setActiveMode('notation');
         } finally {
             setRepertoireDeriving(false);
         }
@@ -2857,8 +2845,6 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
                             libRadioFavorites={libRadioFavorites} setLibRadioFavorites={setLibRadioFavorites}
                             libRadioActive={libRadioActive} setLibRadioActive={setLibRadioActive}
                             libRadioStation={libRadioStation} setLibRadioStation={setLibRadioStation}
-                            libYtMusicToken={libYtMusicToken} setLibYtMusicToken={setLibYtMusicToken}
-                            libLastFmToken={libLastFmToken} setLibLastFmToken={setLibLastFmToken}
                             refreshLibrary={refreshLibrary}
                             audioRef={audioRef} setIsPlaying={setIsPlaying}
                             setSelectedAudio={setSelectedAudio} selectedAudio={selectedAudio}
@@ -2943,8 +2929,7 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
                             nudgeDeck={nudgeDeck} detectBeats={detectBeats}
                             loadWaveform={loadWaveform} formatTime={formatTime}
                             defaultDeckState={defaultDeckState}
-                            libYtMusicToken={libYtMusicToken} setLibYtMusicToken={setLibYtMusicToken}
-                            libLastFmToken={libLastFmToken} setLibLastFmToken={setLibLastFmToken}
+                            refreshLibrary={refreshLibrary}
                         />
                     )}
                     {activeMode === 'notation' && (
@@ -2952,7 +2937,7 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
                             notationView={notationView} setNotationView={setNotationView}
                             notationTracks={notationTracks}
                             activeTrackIdx={activeTrackIdx} setActiveTrackIdx={setActiveTrackIdx}
-                            pianoNotes={pianoNotes} setPianoNotes={setPianoNotes}
+                            setPianoNotes={setPianoNotes}
                             inputCursor={inputCursor} setInputCursor={setInputCursor}
                             inputNoteDuration={inputNoteDuration} setInputNoteDuration={setInputNoteDuration}
                             notationZoom={notationZoom}

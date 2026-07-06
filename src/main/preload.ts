@@ -29,7 +29,7 @@ export interface IElectronAPI {
   libraryLikeTrack: (id: number, liked: boolean) => Promise<any>;
   libraryLikedTracks: () => Promise<any>;
   libraryYoutubeSearch: (query: string) => Promise<any>;
-  libraryYoutubeDownload: (videoUrl: string, outputDir: string) => Promise<any>;
+  libraryYoutubeDownload: (videoUrl: string, outputDir?: string) => Promise<any>;
   libraryRadioRecommendations: (seedId: string) => Promise<any>;
   playlistList: () => Promise<any>;
   playlistCreate: (name: string) => Promise<any>;
@@ -71,7 +71,7 @@ contextBridge.exposeInMainWorld('api', {
   libraryLikeTrack: (id: number, liked: boolean) => ipcRenderer.invoke('library:likeTrack', id, liked),
   libraryLikedTracks: () => ipcRenderer.invoke('library:likedTracks'),
   libraryYoutubeSearch: (query: string) => ipcRenderer.invoke('library:youtubeSearch', query),
-  libraryYoutubeDownload: (videoUrl: string, outputDir: string) => ipcRenderer.invoke('library:youtubeDownload', videoUrl, outputDir),
+  libraryYoutubeDownload: (videoUrl: string, outputDir?: string) => ipcRenderer.invoke('library:youtubeDownload', videoUrl, outputDir),
   libraryRadioRecommendations: (seedId: string) => ipcRenderer.invoke('library:radioRecommendations', seedId),
   playlistList: () => ipcRenderer.invoke('playlist:list'),
   playlistCreate: (name: string) => ipcRenderer.invoke('playlist:create', name),

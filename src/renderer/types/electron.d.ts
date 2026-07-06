@@ -6,6 +6,8 @@ export interface IElectronAPI {
   showSaveDialog: (options: any) => Promise<any>;
   readFileContent: (filePath: string) => Promise<any>;
   writeFileContent: (filePath: string, content: string) => Promise<any>;
+  readFileBuffer: (filePath: string) => Promise<any>;
+  writeFileBuffer: (filePath: string, data: Uint8Array) => Promise<any>;
   repertoireList: () => Promise<any>;
   repertoireGet: (id: number) => Promise<any>;
   repertoireGetSheetXml: (sheetId: number) => Promise<any>;
@@ -14,8 +16,27 @@ export interface IElectronAPI {
   repertoireDelete: (id: number) => Promise<any>;
   repertoireAttachSheet: (args: any) => Promise<any>;
   repertoireDeleteSheet: (sheetId: number) => Promise<any>;
-  generateMusic: (args: any) => Promise<any>;
+  generateMusic: (prompt: string, provider: string, model: string, duration: number, currentPath: string | undefined, opts?: { workspacePath?: string; baseFilename?: string; apiKey?: string }) => Promise<any>;
   loadDemoTracks: () => Promise<any>;
+  proxyFetch: (url: string, options?: any) => Promise<any>;
+  libraryIndexFolder: (folderPath: string) => Promise<any>;
+  libraryRemoveIndexedFolder: (folderId: number) => Promise<any>;
+  libraryListIndexedFolders: () => Promise<any>;
+  libraryListTracks: (opts?: { search?: string; sort?: string; offset?: number; limit?: number }) => Promise<any>;
+  libraryGetTrack: (id: number) => Promise<any>;
+  libraryLikeTrack: (id: number, liked: boolean) => Promise<any>;
+  libraryLikedTracks: () => Promise<any>;
+  libraryYoutubeSearch: (query: string) => Promise<any>;
+  libraryYoutubeDownload: (videoUrl: string, outputDir?: string) => Promise<any>;
+  libraryRadioRecommendations: (seedId: string) => Promise<any>;
+  playlistList: () => Promise<any>;
+  playlistCreate: (name: string) => Promise<any>;
+  playlistDelete: (id: number) => Promise<any>;
+  playlistRename: (id: number, name: string) => Promise<any>;
+  playlistGetTracks: (playlistId: number) => Promise<any>;
+  playlistAddTrack: (playlistId: number, trackId: number) => Promise<any>;
+  playlistRemoveTrack: (ptId: number) => Promise<any>;
+  playlistReorder: (playlistId: number, trackIds: number[]) => Promise<any>;
 }
 declare global {
   interface Window {

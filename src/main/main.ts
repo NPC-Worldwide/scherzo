@@ -352,23 +352,40 @@ ipcMain.handle('library:youtubeSearch', async (_e, query: string) => {
   });
 });
 
-ipcMain.handle('library:youtubeDownload', async (_e, videoUrl: string, outputDir: string) => {
+ipcMain.handle('library:youtubeDownload', async (_e, videoUrl: string, _outputDir?: string) => {
   const ytdlp = findYtDlp();
   if (!ytdlp) return { success: false, error: 'yt-dlp not found' };
-  fs.mkdirSync(outputDir, { recursive: true });
-  return new Promise((resolve) => {
-    exec(`"${ytdlp}" "${videoUrl}" -x --audio-format mp3 --audio-quality 0 -o "${outputDir}/%(title)s.%(ext)s" --print filename --no-playlist`, {
-      timeout: 600000, maxBuffer: 1024 * 1024,
+
+  // Step 1: Extract metadata (artist/uploader) before downloading
+  const metaResult = await new Promise<string>((resolve, reject) => {
+    exec(`"${ytdlp}" "${videoUrl}" --print "%(uploader)s|||%(title)s" --no-playlist --ignore-errors`, {
+      timeout: 15000, maxBuffer: 1024 * 1024,
     }, (err, stdout) => {
+      if (err && !stdout) { reject(err); return; }
+      resolve((stdout || '').trim());
+    });
+  }).catch(() => '');
+
+  const metaParts = metaResult.split('\n').pop()?.split('|||') || [];
+  const artist = (metaParts[0]?.trim() || 'Unknown').replace(/[\/\\:*?"<>|]/g, '_').trim();
+
+  // Always download into ~/.scherzo/library/{artist}/
+  const libraryDir = path.join(os.homedir(), '.scherzo', 'library', artist);
+  fs.mkdirSync(libraryDir, { recursive: true });
+
+  return new Promise((resolve) => {
+    exec(`"${ytdlp}" "${videoUrl}" -x --audio-format mp3 --audio-quality 0 -o "${libraryDir}/%(title)s.%(ext)s" --print filename --no-playlist --ignore-errors`, {
+      timeout: 600000, maxBuffer: 1024 * 1024,
+    }, async (err, stdout) => {
       if (err && !stdout) { resolve({ success: false, error: err.message }); return; }
       const filename = (stdout || '').trim().split('\n').pop()?.trim() || '';
       if (!filename || !fs.existsSync(filename)) { resolve({ success: false, error: `Download failed: ${stdout?.slice(0, 200)}` }); return; }
       const title = path.basename(filename, path.extname(filename));
       const stat = fs.statSync(filename);
       const videoId = videoUrl.split('v=')[1]?.split('&')[0] || '';
-      dbRun('INSERT OR IGNORE INTO library_tracks (path, title, source, source_url, yt_video_id, file_size) VALUES (?, ?, ?, ?, ?, ?)',
-        [filename, title, 'youtube', videoUrl, videoId, stat.size]);
-      resolve({ success: true, path: filename, title });
+      await dbRun('INSERT OR IGNORE INTO library_tracks (path, title, artist, source, source_url, yt_video_id, file_size) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [filename, title, artist, 'youtube', videoUrl, videoId, stat.size]);
+      resolve({ success: true, path: filename, title, artist });
     });
   });
 });

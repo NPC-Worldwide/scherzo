@@ -9,6 +9,7 @@ import {
     Beam, Accidental, StaveConnector,
 } from 'vexflow';
 import { demoScores, DemoScore } from '../lib/scherzoLibrary';
+import { AudioFile } from './Scherzo';
 
 export interface NotationNote {
     note: number;
@@ -132,6 +133,8 @@ interface NotationPanelProps {
     setInputOctave: React.Dispatch<React.SetStateAction<number>>;
     showLibrary: boolean;
     setShowLibrary: React.Dispatch<React.SetStateAction<boolean>>;
+    audioFiles: AudioFile[];
+    setAudioFiles: React.Dispatch<React.SetStateAction<AudioFile[]>>;
     notationUndoStack: NotationNote[][];
     notationRedoStack: NotationNote[][];
     notationMutedTracks: Set<number>;
@@ -161,10 +164,10 @@ interface NotationPanelProps {
     staveLayoutRef: React.MutableRefObject<StaveLayoutEntry[]>;
     sheetMusicScrollRef: React.MutableRefObject<HTMLDivElement | null>;
     sheetPlayheadRef: React.MutableRefObject<HTMLDivElement | null>;
-    pianoRollGridRef: React.MutableRefObject<HTMLDivElement>;
-    pianoRollScrollRef: React.MutableRefObject<HTMLDivElement>;
+    pianoRollGridRef: React.MutableRefObject<HTMLDivElement | null>;
+    pianoRollScrollRef: React.MutableRefObject<HTMLDivElement | null>;
     dragNoteRef: React.MutableRefObject<DragNote | null>;
-    tabScrollRef: React.MutableRefObject<HTMLDivElement>;
+    tabScrollRef: React.MutableRefObject<HTMLDivElement | null>;
 }
 
 const NotationPanel: React.FC<NotationPanelProps> = ({

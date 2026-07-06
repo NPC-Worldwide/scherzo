@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import {
     Music, Play, Pause, RotateCcw, Repeat, X, FolderOpen,
-    Disc3, Sparkles, Loader, Youtube, Radio
+    Disc3, Sparkles, Loader, Youtube, Search
 } from 'lucide-react';
 
 interface AudioFile {
@@ -42,8 +42,8 @@ interface DJMixerPanelProps {
     setDeckA: React.Dispatch<React.SetStateAction<DJDeck>>;
     deckB: DJDeck;
     setDeckB: React.Dispatch<React.SetStateAction<DJDeck>>;
-    deckARef: React.MutableRefObject<HTMLAudioElement>;
-    deckBRef: React.MutableRefObject<HTMLAudioElement>;
+    deckARef: React.RefObject<HTMLAudioElement>;
+    deckBRef: React.RefObject<HTMLAudioElement>;
     djMasterGain: number;
     setDjMasterGain: React.Dispatch<React.SetStateAction<number>>;
     crossfader: number;
@@ -60,14 +60,11 @@ interface DJMixerPanelProps {
     waveformCache: Map<string, number[]>;
     waveformDataCache: Map<string, Float32Array>;
     defaultDeckState: DJDeck;
-    nudgeDeck: (deck: DJDeck, setDeck: React.Dispatch<React.SetStateAction<DJDeck>>, audioRef: React.MutableRefObject<HTMLAudioElement>, amount: number) => void;
+    nudgeDeck: (deck: DJDeck, setDeck: React.Dispatch<React.SetStateAction<DJDeck>>, audioRef: React.RefObject<HTMLAudioElement>, amount: number) => void;
     detectBeats: (audioPath: string) => Promise<{ bpm: number; beats: number[]; key: string }>;
-    loadWaveform: (audioPath: string, audioId: string) => Promise<number[] | null>;
+    loadWaveform: (audioPath: string, audioId: string) => Promise<number[] | null | undefined>;
     formatTime: (seconds: number) => string;
-    libYtMusicToken: string;
-    setLibYtMusicToken: React.Dispatch<React.SetStateAction<string>>;
-    libLastFmToken: string;
-    setLibLastFmToken: React.Dispatch<React.SetStateAction<string>>;
+    refreshLibrary?: () => void;
 }
 
 const HOT_CUE_COLORS = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6', '#ec4899'];
@@ -86,12 +83,24 @@ const DJMixerPanel: React.FC<DJMixerPanelProps> = ({
     waveformCache, waveformDataCache,
     defaultDeckState,
     nudgeDeck, detectBeats, loadWaveform, formatTime,
-    libYtMusicToken, setLibYtMusicToken,
-    libLastFmToken, setLibLastFmToken,
+    refreshLibrary,
 }) => {
     const [loadingDemoTracks, setLoadingDemoTracks] = useState(false);
+    const [showYtSearch, setShowYtSearch] = useState(false);
+    const [ytQuery, setYtQuery] = useState('');
+    const [ytResults, setYtResults] = useState<any[]>([]);
+    const [ytSearching, setYtSearching] = useState(false);
+    const [ytDownloading, setYtDownloading] = useState<string | null>(null);
 
-    const renderDeck = (deck: DJDeck, setDeck: React.Dispatch<React.SetStateAction<DJDeck>>, label: string, audioRef: React.MutableRefObject<HTMLAudioElement>, isLeft: boolean) => {
+    const searchYt = async () => {
+        if (!ytQuery.trim()) return;
+        setYtSearching(true);
+        const r = await window.api?.libraryYoutubeSearch?.(ytQuery.trim());
+        setYtResults(r?.results || []);
+        setYtSearching(false);
+    };
+
+    const renderDeck = (deck: DJDeck, setDeck: React.Dispatch<React.SetStateAction<DJDeck>>, label: string, audioRef: React.RefObject<HTMLAudioElement>, isLeft: boolean) => {
         const waveform = deck.audioFile ? waveformCache.get(deck.audioFile.id) : null;
         const hiResWaveform = deck.audioFile ? waveformDataCache.get(deck.audioFile.id) : null;
         const accentColor = isLeft ? 'blue' : 'orange';
@@ -704,6 +713,13 @@ const DJMixerPanel: React.FC<DJMixerPanelProps> = ({
                 </div>
                 <div className="flex-1"/>
                 <button
+                    onClick={() => setShowYtSearch(!showYtSearch)}
+                    className={`px-3 py-1 rounded text-xs text-white flex items-center gap-1.5 ${showYtSearch ? 'bg-red-600' : 'bg-red-700 hover:bg-red-600'}`}
+                    title="Search and download from YouTube"
+                >
+                    <Youtube size={12}/> YouTube
+                </button>
+                <button
                     onClick={async () => {
                         const api = window.api;
                         if (!api?.loadDemoTracks) {
@@ -768,6 +784,65 @@ const DJMixerPanel: React.FC<DJMixerPanelProps> = ({
                     <span className="text-xs theme-text-muted w-8">{Math.round(djMasterGain * 100)}%</span>
                 </div>
             </div>
+
+            {showYtSearch && (
+                <div className="border-b theme-border theme-bg-secondary p-3 shrink-0">
+                    <div className="flex gap-2 mb-2">
+                        <input
+                            type="text"
+                            value={ytQuery}
+                            onChange={e => setYtQuery(e.target.value)}
+                            placeholder="Search YouTube Music..."
+                            className="flex-1 theme-input text-xs px-2 py-1"
+                            onKeyDown={e => { if (e.key === 'Enter') searchYt(); }}
+                        />
+                        <button
+                            onClick={searchYt}
+                            disabled={ytSearching}
+                            className="px-3 py-1 bg-red-600 hover:bg-red-500 disabled:opacity-50 rounded text-xs text-white flex items-center gap-1"
+                        >
+                            {ytSearching ? <Loader size={12} className="animate-spin"/> : <Search size={12}/>}
+                            {ytSearching ? '...' : 'Search'}
+                        </button>
+                    </div>
+                    {ytResults.length > 0 && (
+                        <div className="max-h-48 overflow-y-auto space-y-0.5">
+                            {ytResults.map((r: any, i: number) => (
+                                <div key={r.id || i} className="flex items-center gap-2 px-2 py-1 rounded theme-hover text-xs">
+                                    <Play size={10} className="text-red-400 cursor-pointer" onClick={() => window.open(r.url, '_blank')}/>
+                                    <span className="flex-1 truncate">{r.title}</span>
+                                    <span className="theme-text-muted">{r.duration ? `${Math.floor(r.duration)}s` : ''}</span>
+                                    <span className="theme-text-muted text-[10px] truncate max-w-[100px]">{r.uploader}</span>
+                                    <button
+                                        onClick={async () => {
+                                            setYtDownloading(r.id);
+                                            const result = await window.api?.libraryYoutubeDownload?.(r.url);
+                                            setYtDownloading(null);
+                                            if (result?.success && result.path) {
+                                                const file: AudioFile = {
+                                                    id: `yt_${r.id}`,
+                                                    name: result.title || r.title,
+                                                    path: result.path,
+                                                    duration: 0,
+                                                };
+                                                setAudioFiles(prev => prev.some(f => f.path === file.path) ? prev : [...prev, file]);
+                                                setSelectedAudio(file);
+                                                refreshLibrary?.();
+                                            } else {
+                                                alert(result?.error || 'Download failed');
+                                            }
+                                        }}
+                                        disabled={ytDownloading === r.id}
+                                        className="px-2 py-0.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 rounded text-[10px] text-white whitespace-nowrap"
+                                    >
+                                        {ytDownloading === r.id ? '...' : 'Download'}
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            )}
 
             <div className="flex-1 flex overflow-hidden w-full">
                 {renderDeck(deckA, setDeckA, 'A', deckARef, true)}
@@ -834,34 +909,6 @@ const DJMixerPanel: React.FC<DJMixerPanelProps> = ({
                                             background: 'linear-gradient(to top, #22c55e, #eab308, #ef4444)'
                                         }}
                                     />
-                    </div>
-                </div>
-                <div className="p-3 border-b theme-border">
-                    <h4 className="text-xs font-semibold theme-text-muted uppercase mb-2">Integrations</h4>
-                    <div className="space-y-2">
-                        <div>
-                            <label className="text-[10px] theme-text-muted flex items-center gap-1">
-                                <Youtube size={10}/> YouTube Music Token
-                            </label>
-                            <input
-                                type="password" value={libYtMusicToken}
-                                onChange={e => setLibYtMusicToken(e.target.value)}
-                                placeholder="OAuth token (WIP)..."
-                                className="w-full theme-input text-[10px] px-2 py-1 mt-0.5"
-                            />
-                        </div>
-                        <div>
-                            <label className="text-[10px] theme-text-muted flex items-center gap-1">
-                                <Radio size={10}/> Last.fm API Key
-                            </label>
-                            <input
-                                type="password" value={libLastFmToken}
-                                onChange={e => setLibLastFmToken(e.target.value)}
-                                placeholder="Scrobble key (WIP)..."
-                                className="w-full theme-input text-[10px] px-2 py-1 mt-0.5"
-                            />
-                        </div>
-                        <p className="text-[9px] theme-text-muted">Sign-in coming in a future update</p>
                     </div>
                 </div>
             </div>
