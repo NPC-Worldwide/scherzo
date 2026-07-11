@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="scherzo.png" alt="Scherzo logo" width="400" height="400">
+  <img src="scherzo_rounded.png" alt="Scherzo logo" width="400" height="400">
 </p>
 
 <h1 align="center">Scherzo</h1>
