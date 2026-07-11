@@ -37,6 +37,12 @@ export interface IElectronAPI {
   playlistAddTrack: (playlistId: number, trackId: number) => Promise<any>;
   playlistRemoveTrack: (ptId: number) => Promise<any>;
   playlistReorder: (playlistId: number, trackIds: number[]) => Promise<any>;
+  checkForUpdates: () => Promise<any>;
+  getAppVersion: () => Promise<string>;
+  downloadAndInstallUpdate: (opts: { releaseUrl: string }) => Promise<any>;
+  onUpdateDownloadProgress: (cb: (data: { progress: number; receivedBytes: number; totalBytes: number }) => void) => () => void;
+  openExternal: (url: string) => Promise<any>;
+  closeWindow: () => void;
 }
 declare global {
   interface Window {

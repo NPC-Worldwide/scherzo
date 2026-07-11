@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron';
 
 export interface IElectronAPI {
   readDirectory: (dirPath: string) => Promise<any>;
@@ -39,6 +39,12 @@ export interface IElectronAPI {
   playlistAddTrack: (playlistId: number, trackId: number) => Promise<any>;
   playlistRemoveTrack: (ptId: number) => Promise<any>;
   playlistReorder: (playlistId: number, trackIds: number[]) => Promise<any>;
+  checkForUpdates: () => Promise<any>;
+  getAppVersion: () => Promise<string>;
+  downloadAndInstallUpdate: (opts: { releaseUrl: string }) => Promise<any>;
+  onUpdateDownloadProgress: (cb: (data: { progress: number; receivedBytes: number; totalBytes: number }) => void) => () => void;
+  openExternal: (url: string) => Promise<any>;
+  closeWindow: () => void;
 }
 
 contextBridge.exposeInMainWorld('api', {
@@ -81,6 +87,16 @@ contextBridge.exposeInMainWorld('api', {
   playlistAddTrack: (playlistId: number, trackId: number) => ipcRenderer.invoke('playlist:addTrack', playlistId, trackId),
   playlistRemoveTrack: (ptId: number) => ipcRenderer.invoke('playlist:removeTrack', ptId),
   playlistReorder: (playlistId: number, trackIds: number[]) => ipcRenderer.invoke('playlist:reorder', playlistId, trackIds),
+  checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
+  getAppVersion: () => ipcRenderer.invoke('get-app-version'),
+  downloadAndInstallUpdate: (opts: any) => ipcRenderer.invoke('download-and-install-update', opts),
+  onUpdateDownloadProgress: (cb: any) => {
+    const handler = (_event: IpcRendererEvent, data: any) => cb(data);
+    ipcRenderer.on('update-download-progress', handler);
+    return () => ipcRenderer.removeListener('update-download-progress', handler);
+  },
+  openExternal: (url: string) => ipcRenderer.invoke('open-external', url),
+  closeWindow: () => ipcRenderer.send('window-close'),
 } as IElectronAPI);
 
 declare global {

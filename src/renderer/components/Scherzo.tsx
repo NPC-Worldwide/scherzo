@@ -25,6 +25,7 @@ import DJMixerPanel from './DJMixerPanel';
 import NotationPanel from './NotationPanel';
 import EditorPanel from './EditorPanel';
 import BeatMakerPanel from './BeatMakerPanel';
+import UpdateChecker from './UpdateChecker';
 
 interface ScherzoProps {
     currentPath?: string;
@@ -2821,6 +2822,10 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
                                     })}
                                 </div>
                             </div>
+                        </div>
+                        <div className="flex-1"/>
+                        <div style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+                            <UpdateChecker />
                         </div>
                     </div>
 

@@ -1,10 +1,11 @@
-import { app, BrowserWindow, ipcMain, dialog, protocol } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, protocol, shell } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import sqlite3 from 'sqlite3';
 import { spawn, exec, execSync } from 'child_process';
 import { fileURLToPath } from 'url';
+import { Readable } from 'node:stream';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -643,5 +644,124 @@ console.log('[Main] All handlers registered');
     return { success: true, audio: b64, format: result.format || 'wav', filename: path.basename(result.path), path: result.path };
   } catch (err: any) {
     return { success: false, error: `Generated file could not be read: ${err.message}` };
+  }
+});
+
+// ── Window close ──────────────────────────────────────────────
+ipcMain.on('window-close', () => BrowserWindow.getFocusedWindow()?.close());
+
+// ─── Update checker ───────────────────────────────────────────
+const fsPromises = fs.promises;
+const APP_VERSION = (() => {
+  try {
+    const pkgPath = path.join(__dirname, '..', 'package.json');
+    return (JSON.parse(fs.readFileSync(pkgPath, 'utf8')).version as string) || '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+})();
+const UPDATE_MANIFEST_URL = 'https://storage.googleapis.com/scherzo-executables/manifest.json';
+
+function compareVersions(a: string, b: string): number {
+  const pa = a.split('.').map(Number);
+  const pb = b.split('.').map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const na = pa[i] || 0;
+    const nb = pb[i] || 0;
+    if (na > nb) return 1;
+    if (na < nb) return -1;
+  }
+  return 0;
+}
+
+function platformDownloadKey(): string {
+  const platform = process.platform;
+  const arch = process.arch;
+  if (platform === 'win32') return 'windows-x64';
+  if (platform === 'linux') return arch === 'arm64' ? 'linux-arm64' : 'linux-x64';
+  if (platform === 'darwin') return arch === 'arm64' ? 'macos-arm64' : 'macos-x64';
+  return 'macos-arm64';
+}
+
+ipcMain.handle('get-app-version', () => APP_VERSION);
+
+ipcMain.handle('check-for-updates', async () => {
+  try {
+    const response = await fetch(UPDATE_MANIFEST_URL);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const manifest: any = await response.json();
+    const latestVersion: string = manifest.version || '0.0.0';
+    const hasUpdate = compareVersions(latestVersion, APP_VERSION) > 0;
+    const platformKey = platformDownloadKey();
+    const releaseUrl: string = manifest.downloads?.[platformKey] || UPDATE_MANIFEST_URL;
+    return {
+      success: true,
+      currentVersion: APP_VERSION,
+      latestVersion,
+      hasUpdate,
+      releaseUrl,
+      downloads: manifest.downloads || {},
+    };
+  } catch (err: any) {
+    return { success: false, error: err?.message || String(err), currentVersion: APP_VERSION };
+  }
+});
+
+ipcMain.handle('open-external', async (_event, url: string) => {
+  try {
+    await shell.openExternal(url);
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err?.message };
+  }
+});
+
+ipcMain.handle('download-and-install-update', async (event, { releaseUrl }: { releaseUrl: string }) => {
+  try {
+    const tmpDir = path.join(os.tmpdir(), 'scherzo-update');
+    await fsPromises.mkdir(tmpDir, { recursive: true });
+    const fileName = path.basename(new URL(releaseUrl).pathname) || 'scherzo-update';
+    const filePath = path.join(tmpDir, fileName);
+
+    const response = await fetch(releaseUrl);
+    if (!response.ok) throw new Error(`Download failed: ${response.status}`);
+    if (!response.body) throw new Error('No response body');
+
+    const totalBytes = parseInt(response.headers.get('content-length') || '0', 10);
+    let receivedBytes = 0;
+    const fileStream = fs.createWriteStream(filePath);
+    const nodeStream = Readable.fromWeb(response.body as any);
+
+    await new Promise<void>((resolve, reject) => {
+      nodeStream.on('data', (chunk: Buffer) => {
+        receivedBytes += chunk.length;
+        if (totalBytes > 0) {
+          const progress = Math.round((receivedBytes / totalBytes) * 100);
+          event.sender.send('update-download-progress', { progress, receivedBytes, totalBytes });
+        }
+      });
+      nodeStream.pipe(fileStream);
+      nodeStream.on('error', reject);
+      fileStream.on('finish', resolve);
+      fileStream.on('error', reject);
+    });
+
+    const platform = process.platform;
+    if (platform === 'darwin' && filePath.endsWith('.dmg')) {
+      spawn('open', [filePath], { detached: true, stdio: 'ignore' }).unref();
+    } else if (platform === 'win32') {
+      spawn(filePath, [], { detached: true, stdio: 'ignore' }).unref();
+    } else if (platform === 'linux') {
+      if (filePath.endsWith('.AppImage')) {
+        await fsPromises.chmod(filePath, 0o755);
+        spawn(filePath, [], { detached: true, stdio: 'ignore' }).unref();
+      } else {
+        spawn('xdg-open', [filePath], { detached: true, stdio: 'ignore' }).unref();
+      }
+    }
+
+    return { success: true, filePath };
+  } catch (err: any) {
+    return { success: false, error: err?.message || String(err) };
   }
 });
