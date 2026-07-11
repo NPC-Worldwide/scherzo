@@ -10,6 +10,7 @@ import { Readable } from 'node:stream';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const IS_DEV = process.env.NODE_ENV === 'development' || process.argv.includes('--dev');
+const ICON_PATH = path.join(__dirname, '..', 'scherzo.png');
 const BACKEND_PORT = IS_DEV ? '7139' : '5139';
 const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
 const DB_DIR = path.join(os.homedir(), '.npcsh', 'scherzo', 'data');
@@ -183,6 +184,7 @@ function initDb(): sqlite3.Database {
 function createWindow() {
   const win = new BrowserWindow({
     width: 1400, height: 900, minWidth: 900, minHeight: 600,
+    ...(fs.existsSync(ICON_PATH) ? { icon: ICON_PATH } : {}),
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true, nodeIntegration: false,
