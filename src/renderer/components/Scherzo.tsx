@@ -911,7 +911,9 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
                     >
                         <ChevronRight size={16}/>
                     </button>
-                    <Music size={20} className="text-purple-400 mb-4"/>
+                    <div className="w-9 h-9 rounded-xl bg-white flex items-center justify-center mb-4 shadow-sm">
+                        <Music size={20} className="text-purple-600"/>
+                    </div>
                     <div className="flex-1"/>
                 </div>
             );
@@ -921,7 +923,9 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
             <div className="w-64 border-r theme-border theme-bg-secondary flex flex-col overflow-hidden">
                 <div className="p-3 border-b theme-border flex items-center justify-between">
                     <div className="flex items-center gap-2">
-                        <Music size={20} className="text-purple-400"/>
+                        <div className="w-8 h-8 rounded-lg bg-white flex items-center justify-center shadow-sm">
+                            <Music size={18} className="text-purple-600"/>
+                        </div>
                         <span className="font-semibold">Scherzo</span>
                     </div>
                     <button
