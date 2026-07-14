@@ -7,9 +7,9 @@
   "type": "module",
   "main": "dist-electron/main.js",
   "scripts": {
-    "postinstall": "node scripts/postinstall.cjs",
     "dev": "npm run build:electron && npm run build:preload && concurrently \"vite\" \"electron . --dev\"",
-    "build": "npm run build:renderer && npm run build:electron && npm run build:preload && electron-builder",
+    "build": "npm run build:renderer && npm run build:electron && npm run build:preload && npm run rebuild:sqlite3 && electron-builder",
+    "rebuild:sqlite3": "node -e \"process.exit(process.platform === 'linux' ? 0 : 1)\" || npm rebuild sqlite3 --build-from-source",
     "build:renderer": "vite build",
     "build:electron": "tsc -p tsconfig.electron.json",
     "build:preload": "tsc -p tsconfig.preload.json && node -e \"require('fs').renameSync('dist-electron/preload.js', 'dist-electron/preload.cjs')\"",

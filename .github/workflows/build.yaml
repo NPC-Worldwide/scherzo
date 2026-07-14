@@ -50,6 +50,10 @@ jobs:
 
       - run: npm install --legacy-peer-deps
 
+      - name: Rebuild sqlite3 from source (Linux)
+        if: runner.os == 'Linux'
+        run: npm rebuild sqlite3 --build-from-source
+
       - name: Build PyInstaller binary (Linux)
         if: runner.os == 'Linux'
         run: |
