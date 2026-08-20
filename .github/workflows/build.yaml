@@ -40,66 +40,11 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install Python dependencies
-        run: pip install -r requirements.txt pyinstaller
-
       - run: npm install --legacy-peer-deps
 
       - name: Rebuild sqlite3 from source (Linux)
         if: runner.os == 'Linux'
         run: npm rebuild sqlite3 --build-from-source
-
-      - name: Build PyInstaller binary (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          pyinstaller --onefile --clean --distpath pyinstaller_dist --noupx \
-            --hidden-import=npcpy --hidden-import=npcpy.serve \
-            --hidden-import=flask --hidden-import=flask_cors --hidden-import=flask_sse \
-            --hidden-import=pillow --hidden-import=pydantic --hidden-import=yaml \
-            --exclude-module=scipy --exclude-module=tensorflow --exclude-module=torch \
-            --exclude-module=sklearn --exclude-module=notebook --exclude-module=ipython \
-            --exclude-module=jupyter --exclude-module=nbconvert --exclude-module=cv2 \
-            --exclude-module=PIL.ImageTk --exclude-module=PIL.ImageQt --exclude-module=docx \
-            --exclude-module=pptx --exclude-module=cuda --exclude-module=cudnn \
-            --exclude-module=cudart --exclude-module=cublas --exclude-module=cupy \
-            --exclude-module=logfire --exclude-module=numba.cuda --exclude-module=torch.cuda \
-            --exclude-module=nltk --exclude-module=tensorflow.python.framework.cuda_util \
-            --collect-data=npcpy scherzo_serve.py
-          mkdir -p resources/backend
-          cp pyinstaller_dist/scherzo_serve resources/backend/
-          chmod +x resources/backend/scherzo_serve
-
-      - name: Build PyInstaller binary (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          python -m PyInstaller --onefile --clean --distpath pyinstaller_dist --noupx --hidden-import=npcpy --hidden-import=npcpy.serve --hidden-import=flask --hidden-import=flask_cors --hidden-import=flask_sse --hidden-import=pillow --hidden-import=pydantic --hidden-import=yaml --collect-data=npcpy scherzo_serve.py
-          mkdir -p resources/backend
-          copy pyinstaller_dist\scherzo_serve.exe resources\backend\scherzo_serve.exe
-
-      - name: Build PyInstaller binary (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          pyinstaller --onefile --clean --distpath pyinstaller_dist --noupx \
-            --hidden-import=npcpy --hidden-import=npcpy.serve \
-            --hidden-import=flask --hidden-import=flask_cors --hidden-import=flask_sse \
-            --hidden-import=pillow --hidden-import=pydantic --hidden-import=yaml \
-            --exclude-module=scipy --exclude-module=tensorflow --exclude-module=torch \
-            --exclude-module=sklearn --exclude-module=notebook --exclude-module=ipython \
-            --exclude-module=jupyter --exclude-module=nbconvert --exclude-module=cv2 \
-            --exclude-module=PIL.ImageTk --exclude-module=PIL.ImageQt --exclude-module=docx \
-            --exclude-module=pptx --exclude-module=cuda --exclude-module=cudnn \
-            --exclude-module=cudart --exclude-module=cublas --exclude-module=cupy \
-            --exclude-module=logfire --exclude-module=numba.cuda --exclude-module=torch.cuda \
-            --exclude-module=nltk --exclude-module=tensorflow.python.framework.cuda_util \
-            --collect-data=npcpy scherzo_serve.py
-          mkdir -p resources/backend
-          cp pyinstaller_dist/scherzo_serve resources/backend/scherzo_serve
-          chmod +x resources/backend/scherzo_serve
 
       - name: Build frontend
         run: |
