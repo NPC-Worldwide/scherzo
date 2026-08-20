@@ -11,123 +11,26 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const IS_DEV = process.env.NODE_ENV === 'development' || process.argv.includes('--dev');
 const ICON_PATH = path.join(__dirname, '..', 'scherzo.png');
-const BACKEND_PORT = IS_DEV ? '7139' : '5139';
-const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
-const DB_DIR = path.join(os.homedir(), '.npcsh', 'scherzo', 'data');
+const DB_DIR = path.join(os.homedir(), '.scherzo', 'data');
 const DB_PATH = path.join(DB_DIR, 'repertoire.db');
+
+// Migrate legacy data from the old ~/.npcsh/scherzo/data location.
+const LEGACY_DB_DIR = path.join(os.homedir(), '.npcsh', 'scherzo', 'data');
+const LEGACY_DB_PATH = path.join(LEGACY_DB_DIR, 'repertoire.db');
+if (fs.existsSync(LEGACY_DB_PATH) && !fs.existsSync(DB_PATH)) {
+  try {
+    fs.mkdirSync(DB_DIR, { recursive: true });
+    fs.copyFileSync(LEGACY_DB_PATH, DB_PATH);
+    console.log('[Main] Migrated legacy DB from', LEGACY_DB_PATH, 'to', DB_PATH);
+  } catch (err: any) {
+    console.error('[Main] Legacy DB migration failed:', err.message);
+  }
+}
 
 protocol.registerSchemesAsPrivileged([{
   scheme: 'media',
   privileges: { standard: true, supportFetchAPI: true, stream: true, secure: true, corsEnabled: true }
 }]);
-
-let backendProcess: ReturnType<typeof spawn> | null = null;
-
-function killBackendProcess() {
-  if (!backendProcess) return;
-  console.log('[Main] Killing backend process');
-  if (process.platform === 'win32') {
-    try { require('child_process').execSync(`taskkill /F /T /PID ${backendProcess.pid}`, { stdio: 'ignore' }); } catch {}
-  } else {
-    const pid = backendProcess.pid;
-    if (pid !== undefined) {
-      try { process.kill(-pid, 'SIGTERM'); } catch {}
-    }
-  }
-  backendProcess = null;
-}
-
-function spawnBackendProcess(pythonPath: string, args: string[], env: Record<string, string>) {
-  console.log(`[Main] Spawning backend: ${pythonPath} ${args.join(' ')}`);
-  const proc = spawn(pythonPath, args, {
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true,
-    detached: process.platform !== 'win32',
-    env,
-  });
-  proc.stdout.on('data', (d: Buffer) => console.log('[Backend stdout]', d.toString().trim()));
-  proc.stderr.on('data', (d: Buffer) => console.error('[Backend stderr]', d.toString().trim()));
-  proc.on('error', (err: Error) => console.error('[Backend error]', err.message));
-  proc.on('close', (code: number | null) => console.log(`[Backend] exited with code ${code}`));
-  return proc;
-}
-
-async function waitForServer(maxAttempts = 60, delay = 1000) {
-  for (let i = 1; i <= maxAttempts; i++) {
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 2000);
-      const res = await fetch(`${BACKEND_URL}/api/health`, { signal: controller.signal });
-      clearTimeout(timeout);
-      if (res.ok) { console.log(`[Main] Backend ready (attempt ${i})`); return true; }
-    } catch {}
-    await new Promise(r => setTimeout(r, delay));
-  }
-  console.error('[Main] Backend failed to start');
-  return false;
-}
-
-function getBackendPythonPath(): string | null {
-  const rc = path.join(os.homedir(), '.npcshrc');
-  try {
-    if (fs.existsSync(rc)) {
-      const content = fs.readFileSync(rc, 'utf8');
-      const m = content.match(/BACKEND_PYTHON_PATH=["']?([^"'\n]+)["']?/);
-      if (m?.[1]?.trim()) {
-        const p = m[1].trim().replace(/^~/, os.homedir());
-        if (fs.existsSync(p)) return p;
-      }
-    }
-  } catch {}
-  return getPythonPath();
-}
-
-async function startBackend() {
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2000);
-    const res = await fetch(`${BACKEND_URL}/api/health`, { signal: controller.signal });
-    clearTimeout(timeout);
-    if (res.ok) { console.log('[Main] Backend already running'); return true; }
-  } catch {}
-
-  const python = getBackendPythonPath();
-  if (!python) {
-    console.error('[Main] No Python found for backend');
-    return false;
-  }
-
-  const backendEnv = {
-    ...process.env,
-    SCHERZO_PORT: BACKEND_PORT,
-    FRONTEND_PORT: IS_DEV ? '7339' : '6339',
-    FLASK_DEBUG: IS_DEV ? '1' : '0',
-    PYTHONUNBUFFERED: '1',
-    PYTHONIOENCODING: 'utf-8',
-    HOME: os.homedir(),
-    NPCSH_BASE: path.join(os.homedir(), '.npcsh'),
-  };
-
-  const isDev = process.env.NODE_ENV === 'development' || process.argv.includes('--dev');
-  if (isDev) {
-    const devScriptPath = path.join(app.getAppPath(), 'scherzo_serve.py');
-    if (fs.existsSync(devScriptPath)) {
-      backendProcess = spawnBackendProcess(python, [devScriptPath], backendEnv);
-      return await waitForServer();
-    }
-  }
-  const executableName = process.platform === 'win32' ? 'scherzo_serve.exe' : 'scherzo_serve';
-  const bundledPath = path.join(process.resourcesPath || '', 'backend', executableName);
-  if (fs.existsSync(bundledPath)) {
-    backendProcess = spawnBackendProcess(bundledPath, [], backendEnv);
-  } else {
-    console.error(`[Main] No backend found at ${bundledPath}`);
-    return false;
-  }
-  return await waitForServer();
-}
-
-app.on('before-quit', () => killBackendProcess());
 
 function initDb(): sqlite3.Database {
   fs.mkdirSync(DB_DIR, { recursive: true });
@@ -196,8 +99,7 @@ function createWindow() {
   else { win.loadFile(path.join(__dirname, '../dist/index.html')); }
 }
 
-app.whenReady().then(async () => {
-  await startBackend();
+app.whenReady().then(() => {
   createWindow();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
@@ -213,43 +115,6 @@ const dbRun = (sql: string, params: unknown[] = []): Promise<{ id: number; chang
     err ? rej(err) : res({ id: this.lastID, changes: this.changes });
   });
 });
-
-function resolveHelperScript(scriptName: string): string | null {
-  const candidates = [
-    path.resolve(__dirname, '..', '..', 'resources', scriptName),
-    path.join(process.resourcesPath || '', scriptName),
-    path.join(app.getAppPath(), 'resources', scriptName),
-  ];
-  return candidates.find(p => { try { return fs.existsSync(p); } catch { return false; } }) || null;
-}
-
-function shellOutHelper(pythonPath: string, scriptName: string, payload: any): Promise<any> {
-  return new Promise((resolve) => {
-    const scriptPath = resolveHelperScript(scriptName);
-    if (!scriptPath) {
-      resolve({ success: false, error: `${scriptName} not found in resources` });
-      return;
-    }
-    const proc = spawn(pythonPath, [scriptPath], { stdio: ['pipe', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
-    proc.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
-    proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
-    proc.on('error', (err: Error) => resolve({ success: false, error: `Failed to spawn ${pythonPath}: ${err.message}` }));
-    proc.on('close', (code: number | null) => {
-      if (code !== 0 && !stdout) {
-        resolve({ success: false, error: stderr || `${scriptName} exited with code ${code}` });
-        return;
-      }
-      try {
-        const last = stdout.trim().split('\n').pop() || '';
-        resolve(JSON.parse(last));
-      } catch (err) {
-        resolve({ success: false, error: `Could not parse helper output: ${(err as Error).message}. stderr: ${stderr}` });
-      }
-    });
-  });
-}
 
 // ── Library IPC ──────────────────────────────────────────────
 console.log('[Main] Registering library IPC handlers...');
@@ -466,23 +331,6 @@ ipcMain.handle('playlist:reorder', async (_e, playlistId: number, trackIds: numb
   } catch (e: any) { return { success: false, error: e.message }; }
 });
 
-function getPythonPath(): string | null {
-  const candidates = [
-    path.join(os.homedir(), '.npcsh', 'venv', 'bin', 'python3'),
-    path.join(os.homedir(), '.npcsh', 'venv', 'Scripts', 'python.exe'),
-    path.join(os.homedir(), '.venv', 'bin', 'python3'),
-    path.join(os.homedir(), '.venv', 'Scripts', 'python.exe'),
-  ];
-  for (const p of candidates) {
-    if (fs.existsSync(p)) return p;
-  }
-  try {
-    const which = require('child_process').execSync('which python3 || which python', { encoding: 'utf8' }).trim();
-    if (which) return which;
-  } catch {}
-  return null;
-}
-
 // File-system IPC
 ipcMain.handle('readDirectory', async (_event: Electron.IpcMainInvokeEvent, dirPath: string) => {
   try {
@@ -588,69 +436,9 @@ ipcMain.handle('load_demo_tracks', async () => {
   }
 });
 
-ipcMain.handle('generate_music', async (_event: Electron.IpcMainInvokeEvent, { prompt, provider, model, duration, currentPath, workspacePath, baseFilename, apiKey }: { prompt: string; provider?: string; model?: string; duration?: number; currentPath?: string; workspacePath?: string; baseFilename?: string; apiKey?: string }) => {
-  console.log(`[Main Process] Generate music: "${prompt}" provider=${provider} model=${model} dur=${duration}s`);
-  if (!prompt) return { success: false, error: 'Prompt is required' };
-
-  const p = (provider || 'local').toLowerCase();
-  const isLocal = ['local', 'musicgen', 'transformers', 'meta'].includes(p);
-
-  // Non-local providers: proxy to the shared backend exactly like incognide does
-  if (!isLocal) {
-    try {
-      const response = await fetch(`${BACKEND_URL}/api/generate_music`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt, provider, model, duration, currentPath }),
-});
-console.log('[Main] All handlers registered');
-      const data = await response.json();
-      if (!response.ok || !data.success) {
-        return { success: false, error: data.error || `HTTP ${response.status}` };
-      }
-      return data;
-    } catch (error: unknown) {
-      console.error('Error generating music via backend:', error);
-      return { success: false, error: (error as Error).message || 'Music generation failed — is the backend running?' };
-    }
-  }
-
-  // Local providers: shell out to Python helper
-  const outputDir = currentPath && currentPath.startsWith('~')
-    ? path.join(os.homedir(), currentPath.slice(1).replace(/^\//, ''))
-    : (currentPath || path.join(os.homedir(), '.npcsh', 'audio'));
-
-  const python = getPythonPath();
-  if (!python) {
-    return { success: false, error: 'No Python environment found. Install npcpy in a venv and try again.' };
-  }
-
-  const result = await shellOutHelper(python, 'run_music_gen.py', {
-    prompt,
-    provider,
-    model,
-    duration,
-    output_dir: outputDir,
-    base_filename: baseFilename,
-    api_key: apiKey,
-  });
-  if (!result.success) {
-    console.error('Music generation (shell-out) failed:', result.error);
-    return { success: false, error: result.error };
-  }
-
-  // Read the generated file and return base64 so the renderer can use it inline
-  try {
-    const buf = fs.readFileSync(result.path);
-    const b64 = buf.toString('base64');
-    return { success: true, audio: b64, format: result.format || 'wav', filename: path.basename(result.path), path: result.path };
-  } catch (err: any) {
-    return { success: false, error: `Generated file could not be read: ${err.message}` };
-  }
-});
-
 // ── Window close ──────────────────────────────────────────────
 ipcMain.on('window-close', () => BrowserWindow.getFocusedWindow()?.close());
+console.log('[Main] All handlers registered');
 
 // ─── Update checker ───────────────────────────────────────────
 const fsPromises = fs.promises;

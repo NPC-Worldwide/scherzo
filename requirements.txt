@@ -1,6 +1,0 @@
-flask
-flask_cors
-flask_sse
-pillow
-npcpy>=2.1.2
-npcsh>=1.2.10

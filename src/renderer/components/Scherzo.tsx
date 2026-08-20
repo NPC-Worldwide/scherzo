@@ -143,29 +143,6 @@ interface DJDeck {
     slipPosition: number;
 }
 
-interface AudioDatasetExample {
-    id: string;
-    prompt: string;
-    negativePrompt?: string;
-    audioPath?: string;
-    duration: number;
-    model: string;
-    qualityScore: number;
-    tags: string[];
-    createdAt: string;
-}
-
-interface AudioDataset {
-    id: string;
-    name: string;
-    description?: string;
-    examples: AudioDatasetExample[];
-    createdAt: string;
-    updatedAt: string;
-    targetModel?: string;
-    tags: string[];
-}
-
 export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
     const aiEnabled = useAiEnabled();
 
@@ -204,12 +181,6 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
     const [volume, setVolume] = useState(1);
     const audioRef = useRef<HTMLAudioElement>(null);
 
-    const [genPrompt, setGenPrompt] = useState('');
-    const [genModel, setGenModel] = useState('');
-    const [generating, setGenerating] = useState(false);
-    const [genDuration, setGenDuration] = useState(30);
-    const [generatedAudio, setGeneratedAudio] = useState<AudioFile[]>([]);
-
     const [tracks, setTracks] = useState<AudioTrack[]>([
         { id: 'track-1', name: 'Track 1', clips: [], volume: 1, pan: 0, muted: false, solo: false, color: 0, height: 80 },
         { id: 'track-2', name: 'Track 2', clips: [], volume: 1, pan: 0, muted: false, solo: false, color: 1, height: 80 }
@@ -242,6 +213,7 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
     const [libYtResults, setLibYtResults] = useState<any[]>([]);
     const [libYtSearching, setLibYtSearching] = useState(false);
     const [libYtDownloading, setLibYtDownloading] = useState<string | null>(null);
+    const [libYtError, setLibYtError] = useState<string | null>(null);
     const [libIndexing, setLibIndexing] = useState(false);
     const [libShowYtSearch, setLibShowYtSearch] = useState(false);
     const [libNewPlaylistName, setLibNewPlaylistName] = useState('');
@@ -461,26 +433,6 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
     const visualizerAnalyzerRef = useRef<AnalyserNode | null>(null);
     const visualizerAudioCtxRef = useRef<AudioContext | null>(null);
     const visualizerSourceRef = useRef<MediaElementAudioSourceNode | null>(null);
-
-    const [audioDatasets, setAudioDatasets] = useState<AudioDataset[]>(() => {
-        try {
-            const stored = localStorage.getItem('scherzo_audioDatasets');
-            return stored ? JSON.parse(stored) : [];
-        } catch { return []; }
-    });
-    const [selectedDatasetId, setSelectedDatasetId] = useState<string | null>(null);
-    const [showCreateDataset, setShowCreateDataset] = useState(false);
-    const [showAddToDataset, setShowAddToDataset] = useState(false);
-    const [newDatasetName, setNewDatasetName] = useState('');
-    const [selectedGeneratedAudio, setSelectedGeneratedAudio] = useState<Set<string>>(new Set());
-    const [selectionMode, setSelectionMode] = useState(false);
-    const [datasetExportFormat, setDatasetExportFormat] = useState<'jsonl' | 'json' | 'csv'>('jsonl');
-
-    useEffect(() => {
-        localStorage.setItem('scherzo_audioDatasets', JSON.stringify(audioDatasets));
-    }, [audioDatasets]);
-
-    const selectedDataset = audioDatasets.find(d => d.id === selectedDatasetId);
 
     const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
         const saved = localStorage.getItem('scherzo_sidebarCollapsed');
@@ -878,17 +830,6 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
             return null;
         }
     }, []);
-
-    const AUDIO_MODELS = [
-        { id: 'replicate:meta/musicgen',           name: 'MusicGen (Replicate)',       provider: 'replicate', backendModel: 'meta/musicgen',               type: 'music' },
-        { id: 'replicate:stackadoc/stable-audio-open-1.0', name: 'Stable Audio Open (Replicate)', provider: 'replicate', backendModel: 'stackadoc/stable-audio-open-1.0', type: 'music' },
-        { id: 'replicate:riffusion/riffusion',     name: 'Riffusion (Replicate)',      provider: 'replicate', backendModel: 'riffusion/riffusion',         type: 'music' },
-        { id: 'local:facebook/musicgen-small',     name: 'MusicGen Small (Local)',     provider: 'local',     backendModel: 'facebook/musicgen-small',     type: 'music' },
-        { id: 'local:facebook/musicgen-medium',    name: 'MusicGen Medium (Local)',    provider: 'local',     backendModel: 'facebook/musicgen-medium',    type: 'music' },
-        { id: 'elevenlabs:sfx',                    name: 'ElevenLabs SFX (≤22s)',      provider: 'elevenlabs', backendModel: 'sound-generation',           type: 'sfx' },
-        { id: 'tts:kokoro',                        name: 'Kokoro (Local TTS)',         provider: 'kokoro',    backendModel: 'kokoro',                      type: 'speech' },
-        { id: 'tts:elevenlabs',                    name: 'ElevenLabs Voice',           provider: 'elevenlabs',backendModel: 'elevenlabs',                  type: 'speech' },
-    ];
 
     const SCHERZO_MODES = [
         { id: 'library', name: 'Listen', icon: Library, group: '' },
@@ -2681,121 +2622,6 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
     };
 
 
-    const createAudioDataset = () => {
-        if (!newDatasetName.trim()) return;
-        const newDataset: AudioDataset = {
-            id: `audio_dataset_${Date.now()}`,
-            name: newDatasetName.trim(),
-            examples: [],
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-            tags: []
-        };
-        setAudioDatasets(prev => [...prev, newDataset]);
-        setSelectedDatasetId(newDataset.id);
-        setNewDatasetName('');
-        setShowCreateDataset(false);
-    };
-
-    const deleteAudioDataset = (id: string) => {
-        setAudioDatasets(prev => prev.filter(d => d.id !== id));
-        if (selectedDatasetId === id) setSelectedDatasetId(null);
-    };
-
-    const addGeneratedToDataset = (datasetId: string) => {
-        const dataset = audioDatasets.find(d => d.id === datasetId);
-        if (!dataset) return;
-
-        const selected = generatedAudio.filter(a => selectedGeneratedAudio.has(a.id));
-        const newExamples: AudioDatasetExample[] = selected.map(audio => ({
-            id: `audio_ex_${Date.now()}_${audio.id}`,
-            prompt: audio.name,
-            audioPath: audio.path,
-            duration: audio.duration || 0,
-            model: genModel,
-            qualityScore: 4,
-            tags: [],
-            createdAt: new Date().toISOString()
-        }));
-
-        setAudioDatasets(prev => prev.map(d =>
-            d.id === datasetId
-                ? { ...d, examples: [...d.examples, ...newExamples], updatedAt: new Date().toISOString() }
-                : d
-        ));
-
-        setSelectedGeneratedAudio(new Set());
-        setSelectionMode(false);
-        setShowAddToDataset(false);
-    };
-
-    const updateAudioExampleQuality = (datasetId: string, exampleId: string, score: number) => {
-        setAudioDatasets(prev => prev.map(d =>
-            d.id === datasetId
-                ? {
-                    ...d,
-                    examples: d.examples.map(ex =>
-                        ex.id === exampleId ? { ...ex, qualityScore: score } : ex
-                    ),
-                    updatedAt: new Date().toISOString()
-                }
-                : d
-        ));
-    };
-
-    const removeAudioExample = (datasetId: string, exampleId: string) => {
-        setAudioDatasets(prev => prev.map(d =>
-            d.id === datasetId
-                ? { ...d, examples: d.examples.filter(ex => ex.id !== exampleId), updatedAt: new Date().toISOString() }
-                : d
-        ));
-    };
-
-    const exportAudioDataset = (dataset: AudioDataset) => {
-        let content = '';
-        let filename = '';
-
-        if (datasetExportFormat === 'jsonl') {
-            content = dataset.examples.map(ex => JSON.stringify({
-                prompt: ex.prompt,
-                audio_path: ex.audioPath,
-                duration: ex.duration,
-                model: ex.model,
-                quality: ex.qualityScore,
-                tags: ex.tags
-            })).join('\n');
-            filename = `${dataset.name.replace(/\s+/g, '_')}_audio.jsonl`;
-        } else if (datasetExportFormat === 'csv') {
-            const headers = 'prompt,audio_path,duration,model,quality,tags';
-            const rows = dataset.examples.map(ex =>
-                `"${ex.prompt.replace(/"/g, '""')}","${ex.audioPath || ''}",${ex.duration},"${ex.model}",${ex.qualityScore},"${ex.tags.join(';')}"`
-            );
-            content = [headers, ...rows].join('\n');
-            filename = `${dataset.name.replace(/\s+/g, '_')}_audio.csv`;
-        } else {
-            content = JSON.stringify(dataset, null, 2);
-            filename = `${dataset.name.replace(/\s+/g, '_')}_audio_full.json`;
-        }
-
-        const blob = new Blob([content], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        a.click();
-        URL.revokeObjectURL(url);
-    };
-
-    const toggleGeneratedSelection = (id: string) => {
-        setSelectedGeneratedAudio(prev => {
-            const next = new Set(prev);
-            if (next.has(id)) next.delete(id);
-            else next.add(id);
-            return next;
-        });
-    };
-
-
     return (
         <div className="flex flex-col h-full w-full overflow-hidden">
             <div className="flex-1 flex overflow-hidden">
@@ -2847,6 +2673,7 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
                             libYtResults={libYtResults} setLibYtResults={setLibYtResults}
                             libYtSearching={libYtSearching} setLibYtSearching={setLibYtSearching}
                             libYtDownloading={libYtDownloading} setLibYtDownloading={setLibYtDownloading}
+                            libYtError={libYtError} setLibYtError={setLibYtError}
                             libIndexing={libIndexing} setLibIndexing={setLibIndexing}
                             libShowYtSearch={libShowYtSearch} setLibShowYtSearch={setLibShowYtSearch}
                             libNewPlaylistName={libNewPlaylistName} setLibNewPlaylistName={setLibNewPlaylistName}

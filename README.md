@@ -19,9 +19,9 @@
 
 ---
 
-Scherzo is a desktop-first music and audio studio that brings listening, recording, mixing, notation, and AI-assisted generation into one workspace. Keep your audio library and projects local; plug in cloud audio providers when you need them.
+Scherzo is a desktop-first music and audio studio that brings listening, recording, mixing, and notation into one workspace. Keep your audio library and projects local.
 
-Built on Electron + React with a Python backend powered by [npcpy](https://github.com/npc-worldwide/npcpy).
+Built on Electron + React + TypeScript. All data stays local; cloud audio providers are optional.
 
 ### Highlights
 
@@ -29,7 +29,6 @@ Built on Electron + React with a Python backend powered by [npcpy](https://githu
 - **Record** — A multi-track audio editor with recording, clips, per-track volume and pan, mute/solo, and mixdown to WAV.
 - **Mix** — A DJ mixer panel for live mixing across decks.
 - **Write** — Music notation with score tracks, clefs, and note editing.
-- **AI generation** — Generate audio and speech from text prompts using local models or cloud providers (OpenAI, ElevenLabs, and more).
 - **Analysis** — Inspect audio with analysis panels for waveform and spectral work.
 - **Local-first** — Your library, repertoire, and projects stay on disk.
 
@@ -45,20 +44,15 @@ Download the installer for your platform from the [releases page](https://github
 
 Scherzo opens to the **Listen** library. Use the sidebar to switch between Listen, Record, Mix, and Write.
 
-### 3. Connect a model provider
-
-Open **Settings** and add API keys for any cloud audio or speech providers you want to use. Keys are stored locally. For local generation, configure a Python environment and select it in settings.
-
 ---
 
 ## Development setup
 
-Scherzo is an Electron + React + TypeScript frontend with a Python Flask backend (`scherzo_serve.py`) powered by [npcpy](https://github.com/npc-worldwide/npcpy).
+Scherzo is an Electron + React + TypeScript desktop app.
 
 ### Prerequisites
 
 - Node.js 22+ and npm
-- Python 3.10+ with [npcpy](https://github.com/npc-worldwide/npcpy) installed
 
 ### Install
 
@@ -95,7 +89,7 @@ npx electron-builder --linux
 ## Community
 
 - **Issues & Bugs**: [GitHub Issues](https://github.com/npc-worldwide/scherzo/issues)
-- **NPC Ecosystem**: [npcpy](https://github.com/npc-worldwide/npcpy) | [npcsh](https://github.com/npc-worldwide/npcsh) | [npcts](https://github.com/npc-worldwide/npcts)
+- **NPC Ecosystem**: [npcts](https://github.com/npc-worldwide/npcts)
 
 ## License
 

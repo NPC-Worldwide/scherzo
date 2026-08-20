@@ -20,6 +20,7 @@ interface LibraryPanelProps {
     libYtResults: any[];
     libYtSearching: boolean;
     libYtDownloading: string | null;
+    libYtError: string | null;
     libIndexing: boolean;
     libShowYtSearch: boolean;
     libNewPlaylistName: string;
@@ -37,6 +38,7 @@ interface LibraryPanelProps {
     setLibYtResults: React.Dispatch<React.SetStateAction<any[]>>;
     setLibYtSearching: React.Dispatch<React.SetStateAction<boolean>>;
     setLibYtDownloading: React.Dispatch<React.SetStateAction<string | null>>;
+    setLibYtError: React.Dispatch<React.SetStateAction<string | null>>;
     setLibIndexing: React.Dispatch<React.SetStateAction<boolean>>;
     setLibShowYtSearch: React.Dispatch<React.SetStateAction<boolean>>;
     setLibNewPlaylistName: React.Dispatch<React.SetStateAction<string>>;
@@ -66,6 +68,7 @@ const LibraryPanel: React.FC<LibraryPanelProps> = ({
     libYtResults,
     libYtSearching,
     libYtDownloading,
+    libYtError,
     libIndexing,
     libShowYtSearch,
     libNewPlaylistName,
@@ -83,6 +86,7 @@ const LibraryPanel: React.FC<LibraryPanelProps> = ({
     setLibYtResults,
     setLibYtSearching,
     setLibYtDownloading,
+    setLibYtError,
     setLibIndexing,
     setLibShowYtSearch,
     setLibNewPlaylistName,
@@ -275,8 +279,10 @@ const LibraryPanel: React.FC<LibraryPanelProps> = ({
                                         const q = (e.target as HTMLInputElement).value.trim();
                                         if (!q) return;
                                         setLibYtSearching(true);
+                                        setLibYtError(null);
                                         const r = await window.api?.libraryYoutubeSearch?.(q);
-                                        setLibYtResults(r?.results || []);
+                                        if (r && !r.success) setLibYtError(r.error || 'Search failed');
+                                        else setLibYtResults(r?.results || []);
                                         setLibYtSearching(false);
                                     }
                                 }}
@@ -287,8 +293,10 @@ const LibraryPanel: React.FC<LibraryPanelProps> = ({
                                     const q = inp?.value?.trim();
                                     if (!q) return;
                                     setLibYtSearching(true);
+                                    setLibYtError(null);
                                     const r = await window.api?.libraryYoutubeSearch?.(q);
-                                    setLibYtResults(r?.results || []);
+                                    if (r && !r.success) setLibYtError(r.error || 'Search failed');
+                                    else setLibYtResults(r?.results || []);
                                     setLibYtSearching(false);
                                 }}
                                 disabled={libYtSearching}
@@ -297,6 +305,11 @@ const LibraryPanel: React.FC<LibraryPanelProps> = ({
                                 {libYtSearching ? '...' : 'Search'}
                             </button>
                         </div>
+                        {libYtError && (
+                            <div className="text-xs text-red-400 bg-red-900/20 border border-red-900/40 rounded p-2 mb-2">
+                                {libYtError}
+                            </div>
+                        )}
                         {libYtResults.length > 0 && (
                             <div className="max-h-48 overflow-y-auto space-y-0.5">
                                 {libYtResults.map((r: any, i: number) => (

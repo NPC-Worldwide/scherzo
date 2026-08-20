@@ -16,9 +16,7 @@ export interface IElectronAPI {
   repertoireDelete: (id: number) => Promise<any>;
   repertoireAttachSheet: (args: any) => Promise<any>;
   repertoireDeleteSheet: (sheetId: number) => Promise<any>;
-  generateMusic: (prompt: string, provider: string, model: string, duration: number, currentPath: string | undefined, opts?: { workspacePath?: string; baseFilename?: string; apiKey?: string }) => Promise<any>;
   loadDemoTracks: () => Promise<any>;
-  proxyFetch: (url: string, options?: any) => Promise<any>;
   libraryIndexFolder: (folderPath: string) => Promise<any>;
   libraryRemoveIndexedFolder: (folderId: number) => Promise<any>;
   libraryListIndexedFolders: () => Promise<any>;

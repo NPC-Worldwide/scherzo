@@ -18,9 +18,7 @@ export interface IElectronAPI {
   repertoireDelete: (id: number) => Promise<any>;
   repertoireAttachSheet: (args: any) => Promise<any>;
   repertoireDeleteSheet: (sheetId: number) => Promise<any>;
-  generateMusic: (prompt: string, provider: string, model: string, duration: number, currentPath: string | undefined, opts?: { workspacePath?: string; baseFilename?: string; apiKey?: string }) => Promise<any>;
   loadDemoTracks: () => Promise<any>;
-  proxyFetch: (url: string, options?: any) => Promise<any>;
   libraryIndexFolder: (folderPath: string) => Promise<any>;
   libraryRemoveIndexedFolder: (folderId: number) => Promise<any>;
   libraryListIndexedFolders: () => Promise<any>;
@@ -65,10 +63,7 @@ contextBridge.exposeInMainWorld('api', {
   repertoireDelete: (id: number) => ipcRenderer.invoke('repertoire:delete', id),
   repertoireAttachSheet: (args: any) => ipcRenderer.invoke('repertoire:attachSheet', args),
   repertoireDeleteSheet: (sheetId: number) => ipcRenderer.invoke('repertoire:deleteSheet', sheetId),
-  generateMusic: (prompt: string, provider: string, model: string, duration: number, currentPath: string | undefined, opts = {}) =>
-    ipcRenderer.invoke('generate_music', { prompt, provider, model, duration, currentPath, workspacePath: opts.workspacePath, baseFilename: opts.baseFilename, apiKey: opts.apiKey }),
   loadDemoTracks: () => ipcRenderer.invoke('load_demo_tracks'),
-  proxyFetch: (url: string, options?: any) => ipcRenderer.invoke('proxy-fetch', url, options),
   libraryIndexFolder: (folderPath: string) => ipcRenderer.invoke('library:indexFolder', folderPath),
   libraryRemoveIndexedFolder: (folderId: number) => ipcRenderer.invoke('library:removeIndexedFolder', folderId),
   libraryListIndexedFolders: () => ipcRenderer.invoke('library:listIndexedFolders'),
