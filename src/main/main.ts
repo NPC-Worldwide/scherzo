@@ -201,6 +201,12 @@ function findYtDlp(): string | null {
   return null;
 }
 
+function findFfmpeg(): string | null {
+  try { return execSync('which ffmpeg 2>/dev/null', { encoding: 'utf8' }).trim(); } catch {}
+  try { return execSync('where ffmpeg 2>nul', { encoding: 'utf8' }).trim(); } catch {}
+  return null;
+}
+
 ipcMain.handle('library:youtubeSearch', async (_e, query: string) => {
   const ytdlp = findYtDlp();
   if (!ytdlp) return { success: false, error: 'yt-dlp not found. Install with: brew install yt-dlp' };
@@ -222,7 +228,8 @@ ipcMain.handle('library:youtubeSearch', async (_e, query: string) => {
 
 ipcMain.handle('library:youtubeDownload', async (_e, videoUrl: string, _outputDir?: string) => {
   const ytdlp = findYtDlp();
-  if (!ytdlp) return { success: false, error: 'yt-dlp not found' };
+  if (!ytdlp) return { success: false, error: 'yt-dlp not found. Install with: brew install yt-dlp' };
+  if (!findFfmpeg()) return { success: false, error: 'ffmpeg not found. Audio extraction requires ffmpeg. Install with: brew install ffmpeg' };
 
   // Step 1: Extract metadata (artist/uploader) before downloading
   const metaResult = await new Promise<string>((resolve, reject) => {
@@ -242,12 +249,17 @@ ipcMain.handle('library:youtubeDownload', async (_e, videoUrl: string, _outputDi
   fs.mkdirSync(libraryDir, { recursive: true });
 
   return new Promise((resolve) => {
-    exec(`"${ytdlp}" "${videoUrl}" -x --audio-format mp3 --audio-quality 0 -o "${libraryDir}/%(title)s.%(ext)s" --print filename --no-playlist --ignore-errors`, {
-      timeout: 600000, maxBuffer: 1024 * 1024,
-    }, async (err, stdout) => {
-      if (err && !stdout) { resolve({ success: false, error: err.message }); return; }
+    const cmd = `"${ytdlp}" "${videoUrl}" -x --audio-format mp3 --audio-quality 0 -o "${libraryDir}/%(title)s.%(ext)s" --print filename --no-playlist --ignore-errors`;
+    exec(cmd, { timeout: 600000, maxBuffer: 1024 * 1024 }, async (err, stdout, stderr) => {
+      if (err && !stdout) {
+        resolve({ success: false, error: stderr || err.message });
+        return;
+      }
       const filename = (stdout || '').trim().split('\n').pop()?.trim() || '';
-      if (!filename || !fs.existsSync(filename)) { resolve({ success: false, error: `Download failed: ${stdout?.slice(0, 200)}` }); return; }
+      if (!filename || !fs.existsSync(filename)) {
+        resolve({ success: false, error: `Download failed: ${stderr || stdout?.slice(0, 200) || 'unknown error'}` });
+        return;
+      }
       const title = path.basename(filename, path.extname(filename));
       const stat = fs.statSync(filename);
       const videoId = videoUrl.split('v=')[1]?.split('&')[0] || '';
