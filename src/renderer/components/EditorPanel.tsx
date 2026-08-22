@@ -7,6 +7,7 @@ import {
     FastForward, Rewind, Lock, Unlock, Move, MousePointer, Magnet,
     BarChart3, ChevronRight
 } from 'lucide-react';
+import { toMediaUrl } from '../lib/utils';
 
 const TRACK_COLORS = [
     { bg: 'from-purple-600 to-purple-800', border: 'border-purple-500', text: 'text-purple-400' },
@@ -457,7 +458,7 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
                             a.preload = 'metadata';
                             a.onloadedmetadata = () => resolve(a.duration || 5);
                             a.onerror = () => resolve(5);
-                            a.src = `file://${src}`;
+                            a.src = toMediaUrl(src);
                         });
 
                         saveUndoState();

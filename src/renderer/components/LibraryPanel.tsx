@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
     Music, Play, Search, Loader, X, RotateCcw,
     Youtube, ListPlus, AlignJustify, LayoutGrid, FolderPlus,
-    FolderOpen, Heart, ListMusic, Radio
+    FolderOpen, Heart, ListMusic, Radio, Edit2, User, Disc
 } from 'lucide-react';
 import RadioPanel from './RadioPanel';
+import { toMediaUrl } from '../lib/utils';
 
 interface LibraryPanelProps {
     libTracks: any[];
@@ -28,6 +29,9 @@ interface LibraryPanelProps {
     libRadioFavorites: any[];
     libRadioActive: boolean;
     libRadioStation: any;
+    libLibraryView: 'songs' | 'artists' | 'albums' | 'playlists';
+    libSelectedArtist: string | null;
+    libSelectedAlbum: string | null;
     setLibQueue: React.Dispatch<React.SetStateAction<any[]>>;
     setLibQueueIndex: React.Dispatch<React.SetStateAction<number>>;
     setLibViewMode: React.Dispatch<React.SetStateAction<'table' | 'grid'>>;
@@ -45,6 +49,9 @@ interface LibraryPanelProps {
     setLibRadioFavorites: React.Dispatch<React.SetStateAction<any[]>>;
     setLibRadioActive: React.Dispatch<React.SetStateAction<boolean>>;
     setLibRadioStation: React.Dispatch<React.SetStateAction<any>>;
+    setLibLibraryView: React.Dispatch<React.SetStateAction<'songs' | 'artists' | 'albums' | 'playlists'>>;
+    setLibSelectedArtist: React.Dispatch<React.SetStateAction<string | null>>;
+    setLibSelectedAlbum: React.Dispatch<React.SetStateAction<string | null>>;
     refreshLibrary: () => void;
     audioRef: React.MutableRefObject<HTMLAudioElement | null>;
     setIsPlaying: React.Dispatch<React.SetStateAction<boolean>>;
@@ -76,6 +83,9 @@ const LibraryPanel: React.FC<LibraryPanelProps> = ({
     libRadioFavorites,
     libRadioActive,
     libRadioStation,
+    libLibraryView,
+    libSelectedArtist,
+    libSelectedAlbum,
     setLibQueue,
     setLibQueueIndex,
     setLibViewMode,
@@ -93,6 +103,9 @@ const LibraryPanel: React.FC<LibraryPanelProps> = ({
     setLibRadioFavorites,
     setLibRadioActive,
     setLibRadioStation,
+    setLibLibraryView,
+    setLibSelectedArtist,
+    setLibSelectedAlbum,
     refreshLibrary,
     audioRef,
     setIsPlaying,
@@ -101,19 +114,167 @@ const LibraryPanel: React.FC<LibraryPanelProps> = ({
     audioSource,
     formatTime,
 }) => {
-    const filteredTracks = libTracks.filter(t =>
+    const filteredTracks = useMemo(() => libTracks.filter(t =>
         !libSearch || t.title?.toLowerCase().includes(libSearch.toLowerCase()) ||
         t.artist?.toLowerCase().includes(libSearch.toLowerCase()) ||
         t.album?.toLowerCase().includes(libSearch.toLowerCase())
-    );
+    ), [libTracks, libSearch]);
+
+    const artists = useMemo(() => {
+        const map = new Map<string, any[]>();
+        filteredTracks.forEach(t => {
+            const key = t.artist?.trim() || 'Unknown Artist';
+            if (!map.has(key)) map.set(key, []);
+            map.get(key)!.push(t);
+        });
+        return Array.from(map.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+    }, [filteredTracks]);
+
+    const albums = useMemo(() => {
+        const map = new Map<string, { artist: string; tracks: any[] }>();
+        filteredTracks.forEach(t => {
+            const key = t.album?.trim() || 'Unknown Album';
+            if (!map.has(key)) map.set(key, { artist: t.artist?.trim() || 'Unknown Artist', tracks: [] });
+            map.get(key)!.tracks.push(t);
+        });
+        return Array.from(map.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+    }, [filteredTracks]);
 
     const playTrack = (track: any) => {
-        if (audioRef.current) {
-            audioRef.current.src = `file://${track.path}`;
-            audioRef.current.play();
-            setIsPlaying(true);
-            setSelectedAudio({ id: track.id.toString(), name: track.title || track.path, path: track.path, duration: track.duration });
+        if (!audioRef.current) {
+            console.warn('[LibraryPanel] playTrack called but audioRef is not mounted');
+            return;
         }
+        if (!track?.path) {
+            console.warn('[LibraryPanel] playTrack called with no path', track);
+            return;
+        }
+        const url = toMediaUrl(track.path);
+        console.log('[LibraryPanel] playTrack', track.id, url);
+        setSelectedAudio({ id: track.id?.toString() || '', name: track.title || track.path, path: track.path, duration: track.duration, artist: track.artist });
+        setIsPlaying(true);
+    };
+
+    const updateTrackField = async (id: number, field: 'title' | 'artist' | 'album', value: string) => {
+        const result = await window.api?.libraryUpdateTrack?.(id, { [field]: value });
+        if (result?.success) refreshLibrary();
+        else alert(result?.error || 'Update failed');
+    };
+
+    const TrackTable = ({ tracks, numbered, editable }: { tracks: any[]; numbered?: boolean; editable?: boolean }) => (
+        <table className="w-full text-xs">
+            <thead className="sticky top-0 theme-bg-secondary">
+                <tr className="theme-text-muted">
+                    {numbered && <th className="w-8 py-1.5">#</th>}
+                    <th className="text-left px-2 py-1.5">Title</th>
+                    <th className="text-left px-2 py-1.5">Artist</th>
+                    <th className="text-left px-2 py-1.5 hidden md:table-cell">Album</th>
+                    <th className="text-right px-2 py-1.5 w-16">Time</th>
+                    <th className="w-10 py-1.5"></th>
+                </tr>
+            </thead>
+            <tbody>
+                {tracks.map((t: any, i: number) => (
+                    <tr
+                        key={t.id || t.pt_id || i}
+                        onDoubleClick={() => playTrack(t)}
+                        className="border-b theme-border theme-hover cursor-pointer group"
+                    >
+                        {numbered && <td className="text-center py-1 theme-text-muted w-8">{i + 1}</td>}
+                        <td className="px-2 py-1 truncate max-w-[250px]">
+                            {!numbered && (
+                                <button onClick={() => playTrack(t)} className="opacity-0 group-hover:opacity-100 p-1 theme-hover rounded mr-1">
+                                    <Play size={10}/>
+                                </button>
+                            )}
+                            {editable ? (
+                                <span
+                                    className={`${t.liked ? 'text-red-400' : ''} inline-flex items-center gap-1`}
+                                    title="Click to edit"
+                                >
+                                    <EditableText value={t.title || t.path?.split('/').pop()?.split('\\').pop()} onSave={(v) => updateTrackField(t.id, 'title', v)}/>
+                                    {t.source === 'youtube' && <Youtube size={10} className="inline text-red-500"/>}
+                                </span>
+                            ) : (
+                                <span className={t.liked ? 'text-red-400' : ''}>
+                                    {t.title || t.path?.split('/').pop()?.split('\\').pop()}
+                                    {t.source === 'youtube' && <Youtube size={10} className="inline ml-1 text-red-500"/>}
+                                </span>
+                            )}
+                        </td>
+                        <td className="px-2 py-1 theme-text-muted truncate max-w-[150px]">
+                            {editable ? (
+                                <EditableText value={t.artist || '-'} onSave={(v) => updateTrackField(t.id, 'artist', v)}/>
+                            ) : (
+                                t.artist || '-'
+                            )}
+                        </td>
+                        <td className="px-2 py-1 theme-text-muted truncate max-w-[150px] hidden md:table-cell">
+                            {editable ? (
+                                <EditableText value={t.album || '-'} onSave={(v) => updateTrackField(t.id, 'album', v)}/>
+                            ) : (
+                                t.album || '-'
+                            )}
+                        </td>
+                        <td className="px-2 py-1 text-right theme-text-muted w-16">{t.duration ? formatTime(t.duration) : '-'}</td>
+                        <td className="py-1 w-10 text-right pr-1">
+                            <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 justify-end">
+                                <button
+                                    onClick={async () => { await window.api?.libraryLikeTrack?.(t.id, !t.liked); refreshLibrary(); }}
+                                    className={`p-0.5 rounded ${t.liked ? 'text-red-400' : 'theme-text-muted'}`}
+                                ><Heart size={11} fill={t.liked ? 'currentColor' : 'none'}/></button>
+                                <button onClick={() => addToQueue(t)} className="p-0.5 theme-text-muted" title="Add to queue">
+                                    <ListPlus size={11}/>
+                                </button>
+                                {libPlaylists.length > 0 && (
+                                    <select
+                                        className="bg-transparent text-[8px] w-4"
+                                        onChange={async (e) => {
+                                            const plId = parseInt(e.target.value);
+                                            if (plId) { await window.api?.playlistAddTrack?.(plId, t.id); refreshLibrary(); }
+                                        }}
+                                        defaultValue=""
+                                    >
+                                        <option value="" disabled>+</option>
+                                        {libPlaylists.map((pl: any) => (
+                                            <option key={pl.id} value={pl.id}>{pl.name}</option>
+                                        ))}
+                                    </select>
+                                )}
+                            </div>
+                        </td>
+                    </tr>
+                ))}
+            </tbody>
+        </table>
+    );
+
+    const EditableText = ({ value, onSave }: { value: string; onSave: (val: string) => void }) => {
+        const [editing, setEditing] = useState(false);
+        const [val, setVal] = useState(value);
+        if (editing) {
+            return (
+                <input
+                    type="text"
+                    value={val}
+                    onChange={(e) => setVal(e.target.value)}
+                    onBlur={() => { setEditing(false); if (val !== value) onSave(val); }}
+                    onKeyDown={(e) => {
+                        if (e.key === 'Enter') { setEditing(false); if (val !== value) onSave(val); }
+                        if (e.key === 'Escape') { setEditing(false); setVal(value); }
+                    }}
+                    autoFocus
+                    className="bg-transparent border-b border-purple-500 outline-none w-full min-w-[80px]"
+                    onClick={(e) => e.stopPropagation()}
+                />
+            );
+        }
+        return (
+            <span className="inline-flex items-center gap-1 group/edit cursor-text" onClick={(e) => { e.stopPropagation(); setEditing(true); setVal(value); }}>
+                {value}
+                <Edit2 size={10} className="opacity-0 group-hover/edit:opacity-100 text-purple-400"/>
+            </span>
+        );
     };
 
     const addToQueue = (track: any) => {
@@ -137,56 +298,78 @@ const LibraryPanel: React.FC<LibraryPanelProps> = ({
 
     return (
         <div className="flex-1 flex overflow-hidden">
-            {/* ── Left Panel: Playlists & Folders ── */}
+            {/* ── Left Panel: Library Nav ── */}
             <div className="w-56 border-r theme-border flex flex-col theme-bg-secondary shrink-0">
                 <div className="p-3 border-b theme-border">
-                    <h4 className="text-xs font-semibold theme-text-muted uppercase mb-2">Playlists</h4>
-                    <div className="flex gap-1 mb-2">
-                        <input
-                            type="text" value={libNewPlaylistName} onChange={e => setLibNewPlaylistName(e.target.value)}
-                            placeholder="New playlist..."
-                            className="flex-1 theme-input text-xs px-2 py-1"
-                            onKeyDown={async (e) => {
-                                if (e.key === 'Enter' && libNewPlaylistName.trim()) {
-                                    await window.api?.playlistCreate?.(libNewPlaylistName.trim());
-                                    setLibNewPlaylistName('');
-                                    refreshLibrary();
-                                }
-                            }}
-                        />
-                        <button
-                            onClick={async () => {
-                                if (!libNewPlaylistName.trim()) return;
-                                await window.api?.playlistCreate?.(libNewPlaylistName.trim());
-                                setLibNewPlaylistName('');
-                                refreshLibrary();
-                            }}
-                            className="p-1 bg-purple-600 hover:bg-purple-500 rounded text-white text-xs"
-                        >+</button>
-                    </div>
-                    <div className="space-y-0.5 max-h-40 overflow-y-auto">
-                        <button
-                            onClick={() => { setLibSelectedPlaylist(null); setLibPlaylistTracks([]); }}
-                            className={`w-full text-left px-2 py-1 rounded text-xs ${libSelectedPlaylist === null ? 'bg-purple-600/30 text-purple-300' : 'theme-hover theme-text-secondary'}`}
-                        >
-                            <Music size={12} className="inline mr-1"/> All Tracks
-                        </button>
-                        {libPlaylists.map((pl: any) => (
-                            <div key={pl.id} className="flex items-center group">
-                                <button
-                                    onClick={() => setLibSelectedPlaylist(pl.id)}
-                                    className={`flex-1 text-left px-2 py-1 rounded text-xs ${libSelectedPlaylist === pl.id ? 'bg-purple-600/30 text-purple-300' : 'theme-hover theme-text-secondary'}`}
-                                >
-                                    <ListMusic size={12} className="inline mr-1"/>{pl.name}
-                                </button>
-                                <button
-                                    onClick={async () => { await window.api?.playlistDelete?.(pl.id); setLibSelectedPlaylist(null); refreshLibrary(); }}
-                                    className="p-0.5 opacity-0 group-hover:opacity-100 theme-hover rounded text-red-400"
-                                ><X size={10}/></button>
-                            </div>
+                    <h4 className="text-xs font-semibold theme-text-muted uppercase mb-2">Library</h4>
+                    <div className="space-y-0.5">
+                        {[
+                            { id: 'songs', icon: Music, label: 'Songs' },
+                            { id: 'artists', icon: User, label: 'Artists' },
+                            { id: 'albums', icon: Disc, label: 'Albums' },
+                            { id: 'playlists', icon: ListMusic, label: 'Playlists' },
+                        ].map((item) => (
+                            <button
+                                key={item.id}
+                                onClick={() => {
+                                    setLibLibraryView(item.id as any);
+                                    setLibSelectedPlaylist(null);
+                                    setLibSelectedArtist(null);
+                                    setLibSelectedAlbum(null);
+                                }}
+                                className={`w-full text-left px-2 py-1 rounded text-xs flex items-center gap-1 ${libLibraryView === item.id ? 'bg-purple-600/30 text-purple-300' : 'theme-hover theme-text-secondary'}`}
+                            >
+                                <item.icon size={12}/> {item.label}
+                            </button>
                         ))}
                     </div>
                 </div>
+                {libLibraryView === 'playlists' && (
+                    <div className="p-3 border-b theme-border">
+                        <h4 className="text-xs font-semibold theme-text-muted uppercase mb-2">Playlists</h4>
+                        <div className="flex gap-1 mb-2">
+                            <input
+                                type="text" value={libNewPlaylistName} onChange={e => setLibNewPlaylistName(e.target.value)}
+                                placeholder="New playlist..."
+                                className="flex-1 theme-input text-xs px-2 py-1"
+                                onKeyDown={async (e) => {
+                                    if (e.key === 'Enter' && libNewPlaylistName.trim()) {
+                                        await window.api?.playlistCreate?.(libNewPlaylistName.trim());
+                                        setLibNewPlaylistName('');
+                                        refreshLibrary();
+                                    }
+                                }}
+                            />
+                            <button
+                                onClick={async () => {
+                                    if (!libNewPlaylistName.trim()) return;
+                                    await window.api?.playlistCreate?.(libNewPlaylistName.trim());
+                                    setLibNewPlaylistName('');
+                                    refreshLibrary();
+                                }}
+                                className="p-1 bg-purple-600 hover:bg-purple-500 rounded text-white text-xs"
+                            >+</button>
+                        </div>
+                        <div className="space-y-0.5 max-h-40 overflow-y-auto">
+                            {libPlaylists.map((pl: any) => (
+                                <div key={pl.id} className="flex items-center group">
+                                    <button
+                                        onClick={() => setLibSelectedPlaylist(pl.id)}
+                                        className={`flex-1 text-left px-2 py-1 rounded text-xs ${libSelectedPlaylist === pl.id ? 'bg-purple-600/30 text-purple-300' : 'theme-hover theme-text-secondary'}`}
+                                    >
+                                        <ListMusic size={12} className="inline mr-1"/>{pl.name}
+                                    </button>
+                                    {!pl.auto_generated && (
+                                        <button
+                                            onClick={async () => { await window.api?.playlistDelete?.(pl.id); setLibSelectedPlaylist(null); refreshLibrary(); }}
+                                            className="p-0.5 opacity-0 group-hover:opacity-100 theme-hover rounded text-red-400"
+                                        ><X size={10}/></button>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                )}
                 <div className="p-3 border-b theme-border flex-1">
                     <h4 className="text-xs font-semibold theme-text-muted uppercase mb-2">Folders</h4>
                     <button
@@ -340,7 +523,7 @@ const LibraryPanel: React.FC<LibraryPanelProps> = ({
                     </div>
                 )}
 
-                {/* Track List or Radio */}
+                {/* Main View Content */}
                 {libRadioActive ? (
                     <RadioPanel
                         active={libRadioActive}
@@ -352,42 +535,72 @@ const LibraryPanel: React.FC<LibraryPanelProps> = ({
                     />
                 ) : (
                     <div className="flex-1 overflow-auto">
-                        {libSelectedPlaylist !== null ? (
-                        /* Playlist tracks */
-                        libPlaylistTracks.length === 0 ? (
-                            <div className="flex items-center justify-center h-full theme-text-muted text-sm">Playlist is empty</div>
-                        ) : (
-                            <table className="w-full text-xs">
-                                <thead className="sticky top-0 theme-bg-secondary">
-                                    <tr className="theme-text-muted">
-                                        <th className="w-8 py-1.5">#</th>
-                                        <th className="text-left px-2 py-1.5">Title</th>
-                                        <th className="text-left px-2 py-1.5">Artist</th>
-                                        <th className="text-right px-2 py-1.5 w-16">Time</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {libPlaylistTracks.map((t: any, i: number) => (
-                                        <tr
-                                            key={t.pt_id || i}
-                                            onDoubleClick={() => playTrack(t)}
-                                            className="border-b theme-border theme-hover cursor-pointer group"
-                                        >
-                                            <td className="text-center py-1 theme-text-muted w-8">{i + 1}</td>
-                                            <td className="px-2 py-1 truncate max-w-[200px] flex items-center gap-2">
-                                                <button onClick={() => playTrack(t)} className="opacity-0 group-hover:opacity-100"><Play size={10}/></button>
-                                                {t.title}
-                                            </td>
-                                            <td className="px-2 py-1 theme-text-muted truncate max-w-[150px]">{t.artist || '-'}</td>
-                                            <td className="px-2 py-1 text-right theme-text-muted w-16">{t.duration ? formatTime(t.duration) : '-'}</td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        )
-                    ) : (
-                        /* All tracks */
-                        filteredTracks.length === 0 ? (
+                        {libLibraryView === 'playlists' && libSelectedPlaylist !== null ? (
+                            /* Selected playlist tracks */
+                            libPlaylistTracks.length === 0 ? (
+                                <div className="flex items-center justify-center h-full theme-text-muted text-sm">Playlist is empty</div>
+                            ) : (
+                                <TrackTable tracks={libPlaylistTracks} numbered />
+                            )
+                        ) : libLibraryView === 'artists' && libSelectedArtist !== null ? (
+                            /* Selected artist tracks */
+                            <TrackTable tracks={artists.find(a => a[0] === libSelectedArtist)?.[1] || []} />
+                        ) : libLibraryView === 'albums' && libSelectedAlbum !== null ? (
+                            /* Selected album tracks */
+                            <TrackTable tracks={albums.find(a => a[0] === libSelectedAlbum)?.[1].tracks || []} />
+                        ) : libLibraryView === 'artists' ? (
+                            /* Artists grid */
+                            <div className="grid grid-cols-4 gap-3 p-3">
+                                {artists.map(([name, tracks]) => (
+                                    <div
+                                        key={name}
+                                        onClick={() => setLibSelectedArtist(name)}
+                                        className="p-3 rounded-lg cursor-pointer theme-hover theme-bg-secondary"
+                                    >
+                                        <div className="aspect-square bg-gradient-to-br from-purple-600/20 to-blue-600/20 rounded flex items-center justify-center mb-2">
+                                            <User size={28} className="text-purple-400"/>
+                                        </div>
+                                        <p className="text-[11px] font-medium truncate">{name}</p>
+                                        <p className="text-[10px] theme-text-muted truncate">{tracks.length} song{tracks.length === 1 ? '' : 's'}</p>
+                                    </div>
+                                ))}
+                            </div>
+                        ) : libLibraryView === 'albums' ? (
+                            /* Albums grid */
+                            <div className="grid grid-cols-4 gap-3 p-3">
+                                {albums.map(([name, { artist, tracks }]) => (
+                                    <div
+                                        key={name}
+                                        onClick={() => setLibSelectedAlbum(name)}
+                                        className="p-3 rounded-lg cursor-pointer theme-hover theme-bg-secondary"
+                                    >
+                                        <div className="aspect-square bg-gradient-to-br from-pink-600/20 to-orange-600/20 rounded flex items-center justify-center mb-2">
+                                            <Disc size={28} className="text-pink-400"/>
+                                        </div>
+                                        <p className="text-[11px] font-medium truncate">{name}</p>
+                                        <p className="text-[10px] theme-text-muted truncate">{artist} · {tracks.length} song{tracks.length === 1 ? '' : 's'}</p>
+                                    </div>
+                                ))}
+                            </div>
+                        ) : libLibraryView === 'playlists' ? (
+                            /* Playlists grid */
+                            <div className="grid grid-cols-4 gap-3 p-3">
+                                {libPlaylists.map((pl: any) => (
+                                    <div
+                                        key={pl.id}
+                                        onClick={() => setLibSelectedPlaylist(pl.id)}
+                                        className="p-3 rounded-lg cursor-pointer theme-hover theme-bg-secondary"
+                                    >
+                                        <div className="aspect-square bg-gradient-to-br from-green-600/20 to-cyan-600/20 rounded flex items-center justify-center mb-2">
+                                            <ListMusic size={28} className="text-green-400"/>
+                                        </div>
+                                        <p className="text-[11px] font-medium truncate">{pl.name}</p>
+                                        {pl.auto_generated && <p className="text-[10px] theme-text-muted truncate">Auto-generated</p>}
+                                    </div>
+                                ))}
+                            </div>
+                        ) : filteredTracks.length === 0 ? (
+                            /* Empty songs state */
                             <div className="flex items-center justify-center h-full">
                                 <div className="text-center">
                                     <Music size={48} className="mx-auto theme-text-muted mb-3"/>
@@ -396,66 +609,10 @@ const LibraryPanel: React.FC<LibraryPanelProps> = ({
                                 </div>
                             </div>
                         ) : libViewMode === 'table' ? (
-                            <table className="w-full text-xs">
-                                <thead className="sticky top-0 theme-bg-secondary">
-                                    <tr className="theme-text-muted">
-                                        <th className="w-8 py-1.5"></th>
-                                        <th className="text-left px-2 py-1.5">Title</th>
-                                        <th className="text-left px-2 py-1.5">Artist</th>
-                                        <th className="text-left px-2 py-1.5 hidden md:table-cell">Album</th>
-                                        <th className="text-right px-2 py-1.5 w-16">Time</th>
-                                        <th className="w-10 py-1.5"></th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {filteredTracks.map((t: any) => (
-                                        <tr
-                                            key={t.id}
-                                            onDoubleClick={() => playTrack(t)}
-                                            className="border-b theme-border theme-hover cursor-pointer group"
-                                        >
-                                            <td className="text-center py-1 w-8">
-                                                <button onClick={() => playTrack(t)} className="opacity-0 group-hover:opacity-100"><Play size={10}/></button>
-                                            </td>
-                                            <td className="px-2 py-1 truncate max-w-[250px]">
-                                                <span className={t.liked ? 'text-red-400' : ''}>{t.title || t.path?.split('/').pop()?.split('\\').pop()}</span>
-                                                {t.source === 'youtube' && <Youtube size={10} className="inline ml-1 text-red-500"/>}
-                                            </td>
-                                            <td className="px-2 py-1 theme-text-muted truncate max-w-[150px]">{t.artist || '-'}</td>
-                                            <td className="px-2 py-1 theme-text-muted truncate max-w-[150px] hidden md:table-cell">{t.album || '-'}</td>
-                                            <td className="px-2 py-1 text-right theme-text-muted w-16">{t.duration ? formatTime(t.duration) : '-'}</td>
-                                            <td className="py-1 w-10 text-right pr-1">
-                                                <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 justify-end">
-                                                    <button
-                                                        onClick={async () => { await window.api?.libraryLikeTrack?.(t.id, !t.liked); refreshLibrary(); }}
-                                                        className={`p-0.5 rounded ${t.liked ? 'text-red-400' : 'theme-text-muted'}`}
-                                                    ><Heart size={11} fill={t.liked ? 'currentColor' : 'none'}/></button>
-                                                    <button onClick={() => addToQueue(t)} className="p-0.5 theme-text-muted" title="Add to queue">
-                                                        <ListPlus size={11}/>
-                                                    </button>
-                                                    {libPlaylists.length > 0 && (
-                                                        <select
-                                                            className="bg-transparent text-[8px] w-4"
-                                                            onChange={async (e) => {
-                                                                const plId = parseInt(e.target.value);
-                                                                if (plId) { await window.api?.playlistAddTrack?.(plId, t.id); refreshLibrary(); }
-                                                            }}
-                                                            defaultValue=""
-                                                        >
-                                                            <option value="" disabled>+</option>
-                                                            {libPlaylists.map((pl: any) => (
-                                                                <option key={pl.id} value={pl.id}>{pl.name}</option>
-                                                            ))}
-                                                        </select>
-                                                    )}
-                                                </div>
-                                            </td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
+                            /* Songs table */
+                            <TrackTable tracks={filteredTracks} editable />
                         ) : (
-                            /* Grid view */
+                            /* Songs grid */
                             <div className="grid grid-cols-4 gap-3 p-3">
                                 {filteredTracks.map((t: any) => (
                                     <div
@@ -472,10 +629,9 @@ const LibraryPanel: React.FC<LibraryPanelProps> = ({
                                     </div>
                                 ))}
                             </div>
-                        )
-                    )}
-                </div>
-            )}
+                        )}
+                    </div>
+                )}
             </div>
 
             {/* ── Queue Panel ── */}

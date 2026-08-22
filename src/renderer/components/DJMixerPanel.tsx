@@ -3,6 +3,7 @@ import {
     Music, Play, Pause, RotateCcw, Repeat, X, FolderOpen,
     Disc3, Sparkles, Loader, Youtube, Search
 } from 'lucide-react';
+import { toMediaUrl } from '../lib/utils';
 
 interface AudioFile {
     id: string;
@@ -447,11 +448,17 @@ const DJMixerPanel: React.FC<DJMixerPanelProps> = ({
                             </button>
                             <button
                                 onClick={() => {
-                                    if (audioRef.current) {
-                                        if (deck.playing) audioRef.current.pause();
-                                        else audioRef.current.play();
+                                    if (deck.playing) {
+                                        audioRef.current?.pause();
+                                        setDeck(prev => ({ ...prev, playing: false }));
+                                    } else {
+                                        audioRef.current?.play()
+                                            .then(() => setDeck(prev => ({ ...prev, playing: true })))
+                                            .catch((err: any) => {
+                                                console.error('[DJMixerPanel] deck play failed', err);
+                                                setDeck(prev => ({ ...prev, playing: false }));
+                                            });
                                     }
-                                    setDeck(prev => ({ ...prev, playing: !prev.playing }));
                                 }}
                                 className={`p-3 rounded-lg ${deck.playing ? 'bg-green-600 hover:bg-green-700' : `${bgAccent} ${bgAccentHover}`}`}
                             >
@@ -603,7 +610,7 @@ const DJMixerPanel: React.FC<DJMixerPanelProps> = ({
                                     volume: prev.volume
                                 }));
                                 if (audioRef.current) {
-                                    audioRef.current.src = `file://${selectedAudio.path}`;
+                                    audioRef.current.src = toMediaUrl(selectedAudio.path);
                                     audioRef.current.load();
                                 }
                             }
@@ -642,7 +649,7 @@ const DJMixerPanel: React.FC<DJMixerPanelProps> = ({
                             setSelectedAudio(file);
                             setDeck(prev => ({ ...defaultDeckState, audioFile: file, volume: prev.volume }));
                             if (audioRef.current) {
-                                audioRef.current.src = `file://${file.path}`;
+                                audioRef.current.src = toMediaUrl(file.path);
                                 audioRef.current.load();
                             }
                         }}
@@ -745,14 +752,14 @@ const DJMixerPanel: React.FC<DJMixerPanelProps> = ({
                             if (newFiles[0]) {
                                 setDeckA(prev => ({ ...defaultDeckState, volume: prev.volume, audioFile: newFiles[0] }));
                                 if (deckARef.current) {
-                                    deckARef.current.src = `file://${newFiles[0].path}`;
+                                    deckARef.current.src = toMediaUrl(newFiles[0].path);
                                     deckARef.current.load();
                                 }
                             }
                             if (newFiles[1]) {
                                 setDeckB(prev => ({ ...defaultDeckState, volume: prev.volume, audioFile: newFiles[1] }));
                                 if (deckBRef.current) {
-                                    deckBRef.current.src = `file://${newFiles[1].path}`;
+                                    deckBRef.current.src = toMediaUrl(newFiles[1].path);
                                     deckBRef.current.load();
                                 }
                             }

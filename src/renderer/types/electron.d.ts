@@ -27,6 +27,7 @@ export interface IElectronAPI {
   libraryYoutubeSearch: (query: string) => Promise<any>;
   libraryYoutubeDownload: (videoUrl: string, outputDir?: string) => Promise<any>;
   libraryRadioRecommendations: (seedId: string) => Promise<any>;
+  libraryUpdateTrack: (id: number, fields: { title?: string; artist?: string; album?: string }) => Promise<any>;
   playlistList: () => Promise<any>;
   playlistCreate: (name: string) => Promise<any>;
   playlistDelete: (id: number) => Promise<any>;

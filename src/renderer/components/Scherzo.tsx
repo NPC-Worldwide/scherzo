@@ -18,6 +18,7 @@ import {
     Beam, Accidental, StaveConnector
 } from 'vexflow';
 import { demoScores, DemoScore } from '../lib/scherzoLibrary';
+import { toMediaUrl } from '../lib/utils';
 import JSZip from 'jszip';
 import RadioPanel from './RadioPanel';
 import LibraryPanel from './LibraryPanel';
@@ -26,6 +27,7 @@ import NotationPanel from './NotationPanel';
 import EditorPanel from './EditorPanel';
 import BeatMakerPanel from './BeatMakerPanel';
 import UpdateChecker from './UpdateChecker';
+import SeekBar from './SeekBar';
 
 interface ScherzoProps {
     currentPath?: string;
@@ -40,6 +42,7 @@ export interface AudioFile {
     waveform?: number[];
     bpm?: number;
     key?: string;
+    artist?: string;
 }
 
 const TRACK_COLORS = [
@@ -223,6 +226,9 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
     });
     const [libRadioActive, setLibRadioActive] = useState(false);
     const [libRadioStation, setLibRadioStation] = useState<any>(null);
+    const [libLibraryView, setLibLibraryView] = useState<'songs' | 'artists' | 'albums' | 'playlists'>('songs');
+    const [libSelectedArtist, setLibSelectedArtist] = useState<string | null>(null);
+    const [libSelectedAlbum, setLibSelectedAlbum] = useState<string | null>(null);
 
     const playNextInQueue = useCallback(() => {
         if (libQueue.length === 0) return;
@@ -230,17 +236,40 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
         if (next < libQueue.length) {
             setLibQueueIndex(next);
             const track = libQueue[next];
-            if (audioRef.current && track.path) {
-                audioRef.current.src = `file://${track.path}`;
-                audioRef.current.play();
-                setIsPlaying(true);
+            if (track.path) {
                 setSelectedAudio({ id: track.id?.toString() || '', name: track.title || '', path: track.path, duration: track.duration });
+                setIsPlaying(true);
             }
         } else {
             setLibQueueIndex(-1);
             setLibQueue([]);
         }
     }, [libQueue, libQueueIndex]);
+
+    const playPrevious = useCallback(() => {
+        if (!audioRef.current || !selectedAudio) return;
+        if (currentTime > 3) {
+            audioRef.current.currentTime = 0;
+        } else {
+            // If we support queue history in future, jump to previous track here
+            audioRef.current.currentTime = 0;
+        }
+    }, [currentTime, selectedAudio]);
+
+    const togglePlay = useCallback(() => {
+        if (!audioRef.current || !selectedAudio) return;
+        if (isPlaying) {
+            audioRef.current.pause();
+            setIsPlaying(false);
+        } else {
+            audioRef.current.play()
+                .then(() => setIsPlaying(true))
+                .catch((err: any) => {
+                    console.error('[Audio] toggle play failed', err);
+                    setIsPlaying(false);
+                });
+        }
+    }, [isPlaying, selectedAudio]);
 
     const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -702,7 +731,7 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
 
     const detectBeats = useCallback(async (audioPath: string): Promise<{ bpm: number; beats: number[]; key: string }> => {
         try {
-            const response = await fetch(`file://${audioPath}`);
+            const response = await fetch(toMediaUrl(audioPath));
             const arrayBuffer = await response.arrayBuffer();
             const audioContext = new AudioContext();
             const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
@@ -929,11 +958,7 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
                                 onClick={() => setSelectedAudio(file)}
                                 onDoubleClick={() => {
                                     setSelectedAudio(file);
-                                    if (audioRef.current) {
-                                        audioRef.current.src = `file://${file.path}`;
-                                        audioRef.current.play();
-                                        setIsPlaying(true);
-                                    }
+                                    setIsPlaying(true);
                                 }}
                                 className={`p-2 rounded cursor-pointer flex items-center gap-2 mb-1 ${
                                     selectedAudio?.id === file.id
@@ -973,13 +998,16 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
                         <div className="flex items-center gap-2">
                             <button
                                 onClick={() => {
-                                    if (audioRef.current) {
-                                        if (isPlaying) {
-                                            audioRef.current.pause();
-                                        } else {
-                                            audioRef.current.play();
-                                        }
-                                        setIsPlaying(!isPlaying);
+                                    if (isPlaying) {
+                                        audioRef.current?.pause();
+                                        setIsPlaying(false);
+                                    } else {
+                                        audioRef.current?.play()
+                                            .then(() => setIsPlaying(true))
+                                            .catch((err: any) => {
+                                                console.error('[Audio] toggle play failed', err);
+                                                setIsPlaying(false);
+                                            });
                                     }
                                 }}
                                 className="p-1.5 bg-purple-600 hover:bg-purple-700 rounded"
@@ -994,13 +1022,6 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
                             </div>
                             <span className="text-xs theme-text-muted">{formatTime(currentTime)}</span>
                         </div>
-                        <audio
-                            ref={audioRef}
-                            src={selectedAudio ? `file://${selectedAudio.path}` : ''}
-                            onTimeUpdate={(e) => setCurrentTime((e.target as HTMLAudioElement).currentTime)}
-                            onLoadedMetadata={(e) => setDuration((e.target as HTMLAudioElement).duration)}
-                            onEnded={() => { setIsPlaying(false); playNextInQueue(); }}
-                        />
                     </div>
                 )}
             </div>
@@ -2681,6 +2702,9 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
                             libRadioFavorites={libRadioFavorites} setLibRadioFavorites={setLibRadioFavorites}
                             libRadioActive={libRadioActive} setLibRadioActive={setLibRadioActive}
                             libRadioStation={libRadioStation} setLibRadioStation={setLibRadioStation}
+                            libLibraryView={libLibraryView} setLibLibraryView={setLibLibraryView}
+                            libSelectedArtist={libSelectedArtist} setLibSelectedArtist={setLibSelectedArtist}
+                            libSelectedAlbum={libSelectedAlbum} setLibSelectedAlbum={setLibSelectedAlbum}
                             refreshLibrary={refreshLibrary}
                             audioRef={audioRef} setIsPlaying={setIsPlaying}
                             setSelectedAudio={setSelectedAudio} selectedAudio={selectedAudio}
@@ -2880,10 +2904,16 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
                                 <div className="p-4 bg-black/50 flex items-center gap-4">
                                     <button
                                         onClick={() => {
-                                            if (audioRef.current) {
-                                                if (isPlaying) audioRef.current.pause();
-                                                else audioRef.current.play();
-                                                setIsPlaying(!isPlaying);
+                                            if (isPlaying) {
+                                                audioRef.current?.pause();
+                                                setIsPlaying(false);
+                                            } else {
+                                                audioRef.current?.play()
+                                                    .then(() => setIsPlaying(true))
+                                                    .catch((err: any) => {
+                                                        console.error('[Audio] visualizer play failed', err);
+                                                        setIsPlaying(false);
+                                                    });
                                             }
                                         }}
                                         className="p-3 bg-purple-600 hover:bg-purple-700 rounded-full"
@@ -2909,6 +2939,125 @@ export const Scherzo: React.FC<ScherzoProps> = ({ currentPath, onClose }) => {
                     )}
                 </main>
             </div>
+            <div className="h-20 theme-bg-secondary border-t theme-border flex flex-col px-3 py-1.5 shrink-0 z-40">
+                <div className="flex items-center gap-3">
+                    {selectedAudio ? (
+                        <>
+                            <div className="w-8 h-8 rounded bg-purple-600/20 flex items-center justify-center shrink-0 overflow-hidden">
+                                <Music size={16} className="text-purple-400"/>
+                            </div>
+                            <div className="flex flex-col min-w-0 w-40 md:w-56">
+                                <span className="text-xs font-medium truncate">{selectedAudio.name}</span>
+                                <span className="text-[10px] theme-text-muted truncate">{selectedAudio.artist || selectedAudio.path?.split('/').pop()?.split('\\').pop()}</span>
+                            </div>
+                        </>
+                    ) : (
+                        <div className="flex items-center gap-2 text-xs theme-text-muted">
+                            <Music size={16} className="text-purple-400"/>
+                            <span>Nothing playing</span>
+                        </div>
+                    )}
+                    <div className="flex-1"/>
+                    <div className="flex items-center gap-1">
+                        <button
+                            onClick={playPrevious}
+                            disabled={!selectedAudio}
+                            className="p-1.5 rounded-full theme-hover disabled:opacity-30 disabled:cursor-not-allowed"
+                            title="Back to start"
+                        >
+                            <SkipBack size={16}/>
+                        </button>
+                        <button
+                            onClick={togglePlay}
+                            disabled={!selectedAudio}
+                            className="p-2 rounded-full bg-purple-600 hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                            title={isPlaying ? 'Pause' : 'Play'}
+                        >
+                            {isPlaying ? <Pause size={18}/> : <Play size={18}/>}
+                        </button>
+                        <button
+                            onClick={() => {
+                                if (audioRef.current) audioRef.current.pause();
+                                setIsPlaying(false);
+                                setCurrentTime(0);
+                                if (audioRef.current) audioRef.current.currentTime = 0;
+                            }}
+                            disabled={!selectedAudio}
+                            className="p-1.5 rounded-full theme-hover disabled:opacity-30 disabled:cursor-not-allowed"
+                            title="Stop"
+                        >
+                            <Square size={16} fill="currentColor"/>
+                        </button>
+                        <button
+                            onClick={playNextInQueue}
+                            disabled={!selectedAudio || libQueue.length === 0}
+                            className="p-1.5 rounded-full theme-hover disabled:opacity-30 disabled:cursor-not-allowed"
+                            title="Next"
+                        >
+                            <SkipForward size={16}/>
+                        </button>
+                    </div>
+                    <div className="flex-1"/>
+                    <div className="flex items-center gap-2 w-24 md:w-32 shrink-0">
+                        {volume === 0 ? <VolumeX size={16} className="theme-text-muted"/> : <Volume2 size={16} className="theme-text-muted"/>}
+                        <input
+                            type="range"
+                            min={0}
+                            max={1}
+                            step={0.01}
+                            value={volume}
+                            onChange={(e) => {
+                                const v = parseFloat(e.target.value);
+                                setVolume(v);
+                                if (audioRef.current) audioRef.current.volume = v;
+                            }}
+                            className="flex-1 h-1 accent-purple-500 bg-purple-500/30 rounded-lg appearance-none cursor-pointer"
+                        />
+                    </div>
+                </div>
+                <SeekBar
+                    currentTime={currentTime}
+                    duration={duration}
+                    disabled={!selectedAudio}
+                    onSeek={(t) => {
+                        console.log('[Scherzo] onSeek', { t, hasAudio: !!audioRef.current, currentTime, duration });
+                        if (audioRef.current && Number.isFinite(t)) {
+                            audioRef.current.currentTime = t;
+                            setCurrentTime(t);
+                        }
+                    }}
+                    formatTime={formatTime}
+                />
+            </div>
+            <audio
+                ref={audioRef}
+                src={selectedAudio ? toMediaUrl(selectedAudio.path) : ''}
+                onTimeUpdate={(e) => {
+                    const t = (e.target as HTMLAudioElement).currentTime;
+                    if (!Number.isFinite(t)) return;
+                    setCurrentTime(t);
+                }}
+                onLoadedMetadata={(e) => {
+                    const a = e.target as HTMLAudioElement;
+                    const dur = a.duration;
+                    console.log('[Audio] loadedmetadata', { src: a.src, duration: dur, currentTime: a.currentTime, isPlaying });
+                    if (Number.isFinite(dur)) setDuration(dur);
+                    a.volume = volume;
+                    if (isPlaying) {
+                        a.play().catch((err: any) => {
+                            console.error('[Audio] auto-play after load failed', err);
+                            setIsPlaying(false);
+                        });
+                    }
+                }}
+                onSeeked={(e) => {
+                    const a = e.target as HTMLAudioElement;
+                    console.log('[Audio] seeked', { currentTime: a.currentTime, seeking: a.seeking });
+                    setCurrentTime(a.currentTime);
+                }}
+                onError={(e) => console.error('[Audio] playback error', (e.target as HTMLAudioElement).error, (e.target as HTMLAudioElement).src)}
+                onEnded={() => { setIsPlaying(false); playNextInQueue(); }}
+            />
         </div>
     );
 };

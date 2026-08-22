@@ -23,3 +23,15 @@ export const formatDate = (isoString: string): string => {
   try { return new Date(isoString).toLocaleDateString(); } catch { return '--'; }
 };
 export const getHomeDir = async (): Promise<string> => window.api.getHomeDir();
+
+/** Build a safe media:// URL for the custom Electron protocol. */
+export const toMediaUrl = (filePath: string): string => {
+  if (!filePath) return '';
+  const encoded = filePath
+    .replace(/\\/g, '/')
+    .split('/')
+    .map((segment) => encodeURIComponent(segment))
+    .join('/');
+  // Use a placeholder host so the absolute path lands in pathname (e.g. media://local/Users/...).
+  return `media://local${encoded}`;
+};

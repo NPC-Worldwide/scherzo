@@ -1,5 +1,6 @@
 import React from 'react';
 import { Plus, Loader, Download, Trash2, X, FileJson, Sparkles } from 'lucide-react';
+import { toMediaUrl } from '../lib/utils';
 
 type RepertoireItem = {
     id: number; title: string; composer: string | null; album: string | null;
@@ -191,7 +192,7 @@ const RepertoirePanel: React.FC<RepertoirePanelProps> = ({
                             <div className="mb-4 p-3 theme-bg-tertiary rounded border theme-border">
                                 <audio
                                     ref={repertoireAudioRef}
-                                    src={`file://${repertoireSelected.audio_path}`}
+                                    src={toMediaUrl(repertoireSelected.audio_path || '')}
                                     controls
                                     controlsList="noplaybackrate nodownload"
                                     className="w-full"
