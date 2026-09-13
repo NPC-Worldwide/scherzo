@@ -53,6 +53,7 @@ jobs:
           npm run build:renderer
           npm run build:electron
           npm run build:preload
+          npm run rebuild:sqlite3
 
       - name: Import Apple Developer ID certificate
         if: runner.os == 'macOS'
