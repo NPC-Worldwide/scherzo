@@ -42,10 +42,6 @@ jobs:
 
       - run: npm install --legacy-peer-deps
 
-      - name: Rebuild sqlite3 from source (Linux)
-        if: runner.os == 'Linux'
-        run: npm rebuild sqlite3 --build-from-source
-
       - name: Build frontend
         run: |
           npm run build:renderer
@@ -80,6 +76,48 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Verify Linux glibc compatibility
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          MAX_GLIBC="2.35"
+          VIOLATIONS=0
+
+          for file in release/linux-unpacked/scherzo release/linux-unpacked/resources/app.asar.unpacked/node_modules/sqlite3/build/Release/*.node; do
+            if [ -f "$file" ]; then
+              versions=$(objdump -T "$file" 2>/dev/null | grep -oE 'GLIBC_[0-9.]+' | sort -V | uniq || true)
+              max=$(echo "$versions" | tail -1 | sed 's/GLIBC_//')
+              if [ -n "$max" ] && [ "$(printf '%s\n%s\n' "$max" "$MAX_GLIBC" | sort -V | tail -1)" != "$MAX_GLIBC" ]; then
+                echo "ERROR: $file requires GLIBC $max (max allowed: $MAX_GLIBC)"
+                VIOLATIONS=$((VIOLATIONS + 1))
+              fi
+            fi
+          done
+
+          deb=$(find release -name '*.deb' -print -quit)
+          if [ -n "$deb" ]; then
+            rm -rf /tmp/deb-check
+            mkdir -p /tmp/deb-check
+            dpkg-deb -x "$deb" /tmp/deb-check
+            while IFS= read -r file; do
+              if file "$file" | grep -q 'ELF 64-bit'; then
+                versions=$(objdump -T "$file" 2>/dev/null | grep -oE 'GLIBC_[0-9.]+' | sort -V | uniq || true)
+                max=$(echo "$versions" | tail -1 | sed 's/GLIBC_//')
+                if [ -n "$max" ] && [ "$(printf '%s\n%s\n' "$max" "$MAX_GLIBC" | sort -V | tail -1)" != "$MAX_GLIBC" ]; then
+                  echo "ERROR: $file requires GLIBC $max (max allowed: $MAX_GLIBC)"
+                  VIOLATIONS=$((VIOLATIONS + 1))
+                fi
+              fi
+            done < <(find /tmp/deb-check -type f)
+          fi
+
+          if [ $VIOLATIONS -gt 0 ]; then
+            echo "Found $VIOLATIONS binary(s) requiring glibc newer than $MAX_GLIBC"
+            exit 1
+          fi
+
+          echo "All Linux binaries are compatible with glibc <= $MAX_GLIBC"
 
       - name: Prepare files for upload
         id: prepare
